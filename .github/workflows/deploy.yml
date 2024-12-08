@@ -1,0 +1,86 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ dev ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build
+      run: npm run build
+      
+    - name: Install sshpass
+      run: sudo apt-get install sshpass
+      
+    - name: Deploy to VM
+      env:
+        VM_HOST: ${{ secrets.VM_HOST }}
+        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        DEPLOY_PATH: "/root/dfanso-tunnel-server"
+        SSHPASS: ${{ secrets.VM_PASSWORD }}
+      run: |
+        # Create deploy directory
+        sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "mkdir -p $DEPLOY_PATH"
+        
+        # Copy files to VM using sshpass
+        sshpass -e rsync -azP --delete \
+          -e "ssh -o StrictHostKeyChecking=no" \
+          --exclude '.git' \
+          --exclude 'node_modules' \
+          ./ root@${{ secrets.VM_HOST }}:$DEPLOY_PATH/
+        
+        # SSH into VM and update application
+        sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "cd $DEPLOY_PATH && \
+          # Install dependencies
+          npm ci --production && \
+          
+          # Create ecosystem config with secrets
+          cat > ecosystem.config.js << 'EOL'
+          module.exports = {
+            apps: [{
+              name: 'dfanso-tunnel',
+              script: './dist/index.js',
+              instances: 2,
+              autorestart: true,
+              watch: true,
+              max_memory_restart: '1G',
+              env: {
+                NODE_ENV: '${{ secrets.NODE_ENV }}',
+                DOMAIN: '${{ secrets.DOMAIN }}',
+                WS_PORT: '${{ secrets.WS_PORT }}',
+                HTTP_PORT: '${{ secrets.HTTP_PORT }}',
+                HTTPS_PORT: '${{ secrets.HTTPS_PORT }}',
+                SSL_DIR: '${{ secrets.SSL_DIR }}'
+              }
+            }]
+          };
+          EOL
+          
+          # Install PM2 globally if not installed
+          if ! command -v pm2 &> /dev/null; then
+            npm install -g pm2
+          fi
+          
+          # Stop existing PM2 process if running
+          pm2 stop dfanso-tunnel || true
+          pm2 delete dfanso-tunnel || true
+          
+          # Start new PM2 process
+          pm2 start ecosystem.config.js && \
+          pm2 save && \
+          pm2 startup"
