@@ -162,12 +162,15 @@ export class TunnelService extends EventEmitter {
           req.on('data', chunk => {
             data += chunk;
           });
-          req.on('end', () => resolve(data));
+          req.on('end', () => {
+            logger.info(`Received request body: ${data}`);
+            resolve(data);
+          });
           req.on('error', reject);
         });
       }
 
-      logger.info(`Request body: ${body}`);
+      logger.info(`Sending tunnel request - Method: ${req.method}, Path: ${req.url}, Body: ${body}`);
 
       // Send request through tunnel
       const clientId = Math.random().toString(36).substring(7);
@@ -180,6 +183,7 @@ export class TunnelService extends EventEmitter {
         body
       };
 
+      logger.info(`Sending message to tunnel: ${JSON.stringify(message)}`);
       tunnel.ws.send(JSON.stringify(message));
 
       // Wait for response
@@ -217,6 +221,11 @@ export class TunnelService extends EventEmitter {
 
       // Handle response
       if (response.type === 'response') {
+        logger.info(`Received tunnel response - Status: ${response.statusCode}, Headers: ${JSON.stringify(response.headers)}`);
+        if (response.data) {
+          logger.info(`Response data (base64): ${response.data.substring(0, 100)}...`);
+        }
+        
         res.writeHead(response.statusCode, response.headers);
         if (response.data) {
           const buffer = Buffer.from(response.data, 'base64');
