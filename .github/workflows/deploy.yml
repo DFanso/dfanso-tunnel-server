@@ -115,6 +115,4 @@ jobs:
           
           echo '=== Final Status ===' && \
           echo 'PM2 process list:' && \
-          pm2 list && \
-          echo 'Recent logs:' && \
-          pm2 logs dfanso-tunnel --lines 20 || true"
+          pm2 list 
