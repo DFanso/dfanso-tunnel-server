@@ -24,6 +24,7 @@ export class TunnelService extends EventEmitter {
   private connections: Map<string, WebSocket> = new Map();
   private sslConfig?: { key: Buffer; cert: Buffer };
   private proxyService: ProxyService;
+  private pendingResponses: Map<WebSocket, ServerResponse> = new Map();
 
   constructor(sslConfig?: { key: Buffer; cert: Buffer }) {
     super();
@@ -270,22 +271,36 @@ export class TunnelService extends EventEmitter {
         reject(new Error('Response timeout'));
       }, 30000);
 
-      const messageHandler = (data: WebSocket.Data) => {
+      const messageHandler = async (data: WebSocket.Data) => {
         try {
           const response = JSON.parse(data.toString());
           
           if (response.type === 'response-start') {
-            // Initial response with status and headers
-            res.writeHead(response.statusCode, response.headers);
+            // Keep content-encoding header if present
+            const headers = { ...response.headers };
+            
+            // Don't override content-encoding if it exists
+            if (!headers['content-encoding'] && response.encoding) {
+              headers['content-encoding'] = response.encoding;
+            }
+
+            // Write headers first
+            res.writeHead(response.statusCode, headers);
+            
             if (!response.isStreaming) {
               resolve(true);
             }
           } else if (response.type === 'response-chunk') {
-            // Handle streaming chunk
-            const chunk = Buffer.from(response.data, 'base64');
+            // Handle compressed data
+            let chunk: Buffer;
+            if (response.isBase64) {
+              chunk = Buffer.from(response.data, 'base64');
+            } else {
+              chunk = Buffer.from(response.data);
+            }
+            
             res.write(chunk);
           } else if (response.type === 'response-end') {
-            // End of response
             clearTimeout(timeout);
             ws.removeListener('message', messageHandler);
             res.end();
@@ -321,6 +336,98 @@ export class TunnelService extends EventEmitter {
       };
 
       ws.on('message', messageHandler);
+    });
+  }
+
+  private handleWebSocketConnection(ws: WebSocket, req: IncomingMessage) {
+    console.log('New WebSocket connection established');
+
+    ws.on('message', async (message: string) => {
+      try {
+        const parsedMessage = JSON.parse(message);
+        
+        if (parsedMessage.type === 'response-start') {
+          const { statusCode, headers, encoding, isStreaming } = parsedMessage;
+          const clientResponse = this.pendingResponses.get(ws);
+          
+          if (clientResponse) {
+            // Set response headers including content encoding if present
+            if (encoding) {
+              headers['content-encoding'] = encoding;
+            }
+            
+            clientResponse.writeHead(statusCode, headers);
+            
+            if (!isStreaming) {
+              this.pendingResponses.delete(ws);
+            }
+          }
+        } 
+        else if (parsedMessage.type === 'response-chunk') {
+          const clientResponse = this.pendingResponses.get(ws);
+          if (clientResponse) {
+            const { data, isBase64 } = parsedMessage;
+            const chunk = isBase64 ? Buffer.from(data, 'base64') : data;
+            clientResponse.write(chunk);
+          }
+        }
+        else if (parsedMessage.type === 'response-end') {
+          const clientResponse = this.pendingResponses.get(ws);
+          if (clientResponse) {
+            clientResponse.end();
+            this.pendingResponses.delete(ws);
+          }
+        }
+        else if (parsedMessage.type === 'error') {
+          console.error('Error from tunnel client:', parsedMessage.error);
+          const clientResponse = this.pendingResponses.get(ws);
+          if (clientResponse) {
+            clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+            clientResponse.end(JSON.stringify({
+              error: 'Bad Gateway',
+              details: parsedMessage.error
+            }));
+            this.pendingResponses.delete(ws);
+          }
+        }
+      } catch (error) {
+        console.error('Error handling WebSocket message:', error);
+        const clientResponse = this.pendingResponses.get(ws);
+        if (clientResponse) {
+          clientResponse.writeHead(500, { 'Content-Type': 'application/json' });
+          clientResponse.end(JSON.stringify({
+            error: 'Internal Server Error',
+            details: 'Error processing tunnel response'
+          }));
+          this.pendingResponses.delete(ws);
+        }
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('WebSocket connection closed');
+      const clientResponse = this.pendingResponses.get(ws);
+      if (clientResponse) {
+        clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+        clientResponse.end(JSON.stringify({
+          error: 'Bad Gateway',
+          details: 'Tunnel connection closed unexpectedly'
+        }));
+        this.pendingResponses.delete(ws);
+      }
+    });
+
+    ws.on('error', (error) => {
+      console.error('WebSocket error:', error);
+      const clientResponse = this.pendingResponses.get(ws);
+      if (clientResponse) {
+        clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+        clientResponse.end(JSON.stringify({
+          error: 'Bad Gateway',
+          details: 'Tunnel connection error'
+        }));
+        this.pendingResponses.delete(ws);
+      }
     });
   }
 }
