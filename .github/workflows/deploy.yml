@@ -90,7 +90,24 @@ jobs:
           pm2 stop dfanso-tunnel || true
           pm2 delete dfanso-tunnel || true
           
-          # Start new PM2 process
-          pm2 start ecosystem.config.js && \
-          pm2 save && \
-          pm2 startup"
+          # Start new PM2 process with error checking
+          if ! pm2 start ecosystem.config.js; then
+            echo 'Failed to start PM2 process'
+            pm2 logs dfanso-tunnel --lines 50
+            exit 1
+          fi
+          
+          # Save PM2 process list and set up startup
+          pm2 save
+          pm2 startup
+          
+          # Check if process is running
+          if ! pm2 pid dfanso-tunnel > /dev/null; then
+            echo 'PM2 process is not running'
+            pm2 logs dfanso-tunnel --lines 50
+            exit 1
+          fi
+          
+          # Show process status
+          pm2 list
+          pm2 logs dfanso-tunnel --lines 20"
