@@ -153,7 +153,8 @@ export class TunnelService extends EventEmitter {
     logger.info(`Proxying request for subdomain: ${subdomain}`, {
       headers: req.headers,
       url: req.url,
-      method: req.method
+      method: req.method,
+      timestamp: new Date().toISOString()
     });
 
     const tunnel = this.tunnels.get(subdomain);
@@ -169,15 +170,27 @@ export class TunnelService extends EventEmitter {
     try {
       const target = tunnel.targetUrl || (tunnel.targetPort ? `http://localhost:${tunnel.targetPort}` : undefined);
       if (!target) {
-        logger.error(`No target URL or port found for tunnel: ${subdomain}`);
+        logger.error(`No target URL or port found for tunnel: ${subdomain}`, {
+          tunnel: {
+            subdomain: tunnel.subdomain,
+            targetPort: tunnel.targetPort,
+            targetUrl: tunnel.targetUrl
+          }
+        });
         res.writeHead(502);
         res.end(JSON.stringify({ error: 'Tunnel target not configured' }));
         return;
       }
+
+      logger.info(`Forwarding request to target: ${target}`, {
+        subdomain,
+        method: req.method,
+        url: req.url
+      });
       
       await this.handleProxyRequest(req, res, target);
     } catch (error) {
-      logger.error('Error in proxyRequest', { error });
+      logger.error('Error in proxyRequest', { error, subdomain });
       res.statusCode = 500;
       res.end(JSON.stringify({ error: 'Proxy request failed' }));
     }
@@ -187,11 +200,40 @@ export class TunnelService extends EventEmitter {
     try {
       const proxy = httpProxy.createProxyServer({});
       
+      // Add error handler for proxy errors
+      proxy.on('error', (err: Error, req: IncomingMessage, res: ServerResponse) => {
+        logger.error('Proxy error', {
+          error: err.message,
+          target,
+          headers: req.headers,
+          method: req.method,
+          url: req.url
+        });
+
+        // Check if the error is connection refused
+        if (err.message.includes('ECONNREFUSED')) {
+          logger.error('Target service not available', {
+            target,
+            error: 'Connection refused'
+          });
+          res.writeHead(502);
+          res.end(JSON.stringify({ 
+            error: 'Target service not available',
+            details: 'Connection refused. Make sure the target service is running.'
+          }));
+          return;
+        }
+
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Proxy error', details: err.message }));
+      });
+
       proxy.web(req, res, {
         target,
         secure: false,
         changeOrigin: true,
-        selfHandleResponse: true
+        selfHandleResponse: true,
+        ws: false // Disable WebSocket upgrade for HTTP requests
       });
 
       proxy.on('proxyRes', (proxyRes: IncomingMessage, req: IncomingMessage, res: ServerResponse) => {
@@ -221,14 +263,15 @@ export class TunnelService extends EventEmitter {
               statusCode: proxyRes.statusCode,
               contentEncoding: encoding,
               contentLength: buffer.length,
-              headers: proxyRes.headers
+              headers: proxyRes.headers,
+              target
             });
 
             // Send the response
             res.end(buffer);
 
           } catch (error) {
-            logger.error('Error processing proxy response', { error });
+            logger.error('Error processing proxy response', { error, target });
             res.statusCode = 500;
             res.end(JSON.stringify({ error: 'Error processing response' }));
           }
@@ -236,7 +279,7 @@ export class TunnelService extends EventEmitter {
       });
 
     } catch (error) {
-      logger.error('Error in proxyRequest', { error });
+      logger.error('Error in handleProxyRequest', { error, target });
       res.statusCode = 500;
       res.end(JSON.stringify({ error: 'Proxy request failed' }));
     }
