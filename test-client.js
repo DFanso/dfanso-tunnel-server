@@ -13,33 +13,50 @@ const localServer = http.createServer((req, res) => {
   req.on('end', () => {
     console.log('Request body:', body);
 
-    if (req.url === '/api/test' && req.method === 'POST') {
-      try {
-        const jsonData = JSON.parse(body);
-        console.log('Received JSON data:', jsonData);
-        
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          status: 'success',
-          message: 'POST request received',
-          receivedData: jsonData
-        }));
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON data' }));
+    // Forward request to test server
+    const options = {
+      hostname: 'localhost',
+      port: 8000, // Test server port
+      path: req.url,
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: 'localhost:8000'
       }
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Hello from local server!');
+    };
+
+    const testServerReq = http.request(options, (testServerRes) => {
+      // Copy status and headers from test server response
+      res.writeHead(testServerRes.statusCode, testServerRes.headers);
+
+      // Forward response body
+      testServerRes.on('data', chunk => {
+        res.write(chunk);
+      });
+
+      testServerRes.on('end', () => {
+        res.end();
+      });
+    });
+
+    testServerReq.on('error', (error) => {
+      console.error('Error forwarding to test server:', error);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Error forwarding request to test server' }));
+    });
+
+    // Forward request body if present
+    if (body) {
+      testServerReq.write(body);
     }
+    testServerReq.end();
   });
 });
 
-// Configuration
-const SERVER_IP = 'dfanso.dev';  // Your domain
 const LOCAL_PORT = 3000;
 const SUBDOMAIN = 'test';
-const TUNNEL_SERVER = `wss://${SERVER_IP}:8080`;  // Using secure WebSocket
+const SERVER_IP = 'dfanso.dev';
+const TUNNEL_SERVER = `wss://${SERVER_IP}:8080`;
 
 localServer.listen(LOCAL_PORT, () => {
   console.log(`Local server listening on port ${LOCAL_PORT}`);
@@ -84,8 +101,9 @@ localServer.listen(LOCAL_PORT, () => {
 });
 
 function handleTunnelRequest(message, ws) {
-  const { clientId, method, path, headers } = message;
+  const { clientId, method, path, headers, body } = message;
   console.log('Handling tunnel request:', method, path);
+  console.log('Request body:', body);
 
   // Create options for local request
   const options = {
@@ -93,24 +111,29 @@ function handleTunnelRequest(message, ws) {
     port: LOCAL_PORT,
     path: path,
     method: method,
-    headers: headers
+    headers: {
+      ...headers,
+      host: `localhost:${LOCAL_PORT}`
+    }
   };
 
   // Make request to local server
   const req = http.request(options, (res) => {
-    let body = '';
+    let responseBody = '';
     res.on('data', (chunk) => {
-      body += chunk;
+      responseBody += chunk;
     });
 
     res.on('end', () => {
+      console.log('Local server response:', responseBody);
+      
       // Send response back through tunnel
       ws.send(JSON.stringify({
         type: 'response',
         clientId: clientId,
         statusCode: res.statusCode,
         headers: res.headers,
-        data: Buffer.from(body).toString('base64')
+        data: Buffer.from(responseBody).toString('base64')
       }));
     });
   });
@@ -124,7 +147,10 @@ function handleTunnelRequest(message, ws) {
     }));
   });
 
-  // End the request
+  // Write request body if present
+  if (body) {
+    req.write(body);
+  }
   req.end();
 }
 
