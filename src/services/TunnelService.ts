@@ -132,108 +132,148 @@ export class TunnelService extends EventEmitter {
     });
   }
 
-  async proxyRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  public proxyRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const host = req.headers.host;
     if (!host) {
       logger.error('No host header found in request');
       res.writeHead(400);
       res.end(JSON.stringify({ error: 'No host header found' }));
-      return;
+      return Promise.resolve();
     }
 
     const subdomain = host.split('.')[0];
-    logger.info(`Proxying request for subdomain: ${subdomain}`);
-    logger.info(`Request method: ${req.method}, path: ${req.url}`);
+    logger.info(`Proxying request for subdomain: ${subdomain}`, {
+      headers: req.headers,
+      url: req.url,
+      method: req.method
+    });
 
     const tunnel = this.tunnels.get(subdomain);
     if (!tunnel) {
-      logger.error(`No tunnel found for subdomain: ${subdomain}`);
+      logger.error(`No tunnel found for subdomain: ${subdomain}`, {
+        availableTunnels: Array.from(this.tunnels.keys())
+      });
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'Tunnel not found' }));
-      return;
+      return Promise.resolve();
     }
 
-    try {
-      // Get request body if present
-      let body = '';
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        body = await new Promise<string>((resolve, reject) => {
-          let data = '';
-          req.on('data', chunk => {
-            data += chunk;
+    return new Promise<void>(async (resolve, reject) => {
+      try {
+        // Get request body if present
+        let body = '';
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          body = await new Promise<string>((resolve, reject) => {
+            let data = '';
+            req.on('data', chunk => {
+              data += chunk;
+            });
+            req.on('end', () => resolve(data));
+            req.on('error', reject);
           });
-          req.on('end', () => resolve(data));
-          req.on('error', reject);
-        });
-      }
-
-      logger.info(`Request body: ${body}`);
-
-      // Send request through tunnel
-      const clientId = Math.random().toString(36).substring(7);
-      const message = {
-        type: 'request',
-        clientId,
-        method: req.method,
-        path: req.url,
-        headers: req.headers,
-        body
-      };
-
-      tunnel.ws.send(JSON.stringify(message));
-
-      // Wait for response
-      const response = await new Promise<{
-        type: string;
-        statusCode: number;
-        headers: Record<string, string | string[]>;
-        data?: string;
-        error?: string;
-      }>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Tunnel timeout'));
-          cleanup();
-        }, 30000);
-
-        const cleanup = () => {
-          tunnel.ws.removeListener('message', handleMessage);
-          clearTimeout(timeout);
-        };
-
-        const handleMessage = (data: WebSocket.Data) => {
-          try {
-            const message = JSON.parse(data.toString());
-            if (message.clientId === clientId) {
-              cleanup();
-              resolve(message);
-            }
-          } catch (err) {
-            logger.error('Error parsing tunnel response:', err);
-          }
-        };
-
-        tunnel.ws.on('message', handleMessage);
-      });
-
-      // Handle response
-      if (response.type === 'response') {
-        res.writeHead(response.statusCode, response.headers);
-        if (response.data) {
-          const buffer = Buffer.from(response.data, 'base64');
-          res.end(buffer);
-        } else {
-          res.end();
         }
-      } else if (response.type === 'error') {
-        logger.error('Tunnel error:', response.error);
-        res.writeHead(502);
-        res.end(JSON.stringify({ error: 'Tunnel error', details: response.error }));
+
+        // Prepare headers for Next.js compatibility
+        const headers = { ...req.headers };
+        
+        // Ensure proper forwarding headers are set
+        const proto = req.headers['x-forwarded-proto'] || 'https';
+        headers['x-forwarded-proto'] = proto;
+        headers['x-forwarded-host'] = host;
+        headers['x-forwarded-port'] = '443';
+        headers['x-forwarded-for'] = req.socket.remoteAddress || '';
+        
+        // Next.js specific headers
+        headers['x-real-ip'] = req.socket.remoteAddress || '';
+        headers['x-nextjs-data'] = '1';
+
+        // Handle Next.js specific paths
+        let path = req.url || '/';
+        if (path.startsWith('/_next/')) {
+          logger.debug(`Next.js asset request: ${path}`);
+        }
+
+        const message = {
+          type: 'request',
+          clientId: Math.random().toString(36).substring(7),
+          method: req.method,
+          path,
+          headers,
+          body
+        };
+
+        logger.debug(`Sending tunnel message for ${subdomain}:`, { message });
+        tunnel.ws.send(JSON.stringify(message));
+
+        // Wait for response
+        const response = await new Promise<{
+          type: string;
+          statusCode: number;
+          headers: Record<string, string | string[]>;
+          data?: string;
+          error?: string;
+        }>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Tunnel timeout'));
+            cleanup();
+          }, 30000);
+
+          const cleanup = () => {
+            tunnel.ws.removeListener('message', handleMessage);
+            clearTimeout(timeout);
+          };
+
+          const handleMessage = (data: WebSocket.Data) => {
+            try {
+              const message = JSON.parse(data.toString());
+              logger.debug(`Received tunnel response for ${subdomain}:`, { message });
+              if (message.clientId === message.clientId) {
+                cleanup();
+                resolve(message);
+              }
+            } catch (err) {
+              logger.error('Error parsing tunnel response:', err);
+            }
+          };
+
+          tunnel.ws.on('message', handleMessage);
+        });
+
+        // Handle response
+        if (response.type === 'response') {
+          // Ensure CORS headers for Next.js
+          const responseHeaders = {
+            ...response.headers,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'X-Requested-With, Content-Type, Accept'
+          };
+
+          logger.debug(`Sending response for ${subdomain}:`, {
+            statusCode: response.statusCode,
+            headers: responseHeaders
+          });
+
+          res.writeHead(response.statusCode, responseHeaders);
+          if (response.data) {
+            const buffer = Buffer.from(response.data, 'base64');
+            res.end(buffer);
+          } else {
+            res.end();
+          }
+        } else if (response.type === 'error') {
+          logger.error(`Tunnel error for ${subdomain}:`, response.error);
+          res.writeHead(502);
+          res.end(JSON.stringify({ error: 'Tunnel error', details: response.error }));
+        }
+        resolve();
+      } catch (err) {
+        const error = err as Error;
+        logger.error(`Error handling request for ${subdomain}:`, error);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: 'Internal server error', details: error.message }));
+        reject(error);
       }
-    } catch (err) {
-      const error = err as Error;
-      logger.error('Error handling request:', error);
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: 'Internal server error', details: error.message }));
-    }
+    });
   }
 }
