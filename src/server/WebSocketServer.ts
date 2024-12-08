@@ -55,9 +55,9 @@ export class WebSocketServer {
           logger.info('Received WebSocket message:', message);
 
           if (message.type === 'register') {
-            if (!message.port) {
-              logger.error('No port specified in registration message');
-              ws.send(JSON.stringify({ type: 'error', error: 'No port specified' }));
+            if (!message.port || typeof message.port !== 'number' || message.port < 1 || message.port > 65535) {
+              logger.error('Invalid port specified in registration message');
+              ws.send(JSON.stringify({ type: 'error', error: 'Invalid port specified. Port must be a number between 1 and 65535' }));
               return;
             }
             this.tunnelService.registerTunnel(message.subdomain, ws, message.port);

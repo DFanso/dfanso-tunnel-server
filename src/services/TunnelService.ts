@@ -140,6 +140,32 @@ export class TunnelService extends EventEmitter {
     });
   }
 
+  private async validateTargetService(target: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      
+      socket.setTimeout(2000); // 2 second timeout
+      
+      socket.on('connect', () => {
+        socket.destroy();
+        resolve(true);
+      });
+      
+      socket.on('timeout', () => {
+        socket.destroy();
+        resolve(false);
+      });
+      
+      socket.on('error', () => {
+        socket.destroy();
+        resolve(false);
+      });
+      
+      const [host] = target.split(':');
+      socket.connect(port, host.replace(/^https?:\/\//, ''));
+    });
+  }
+
   public async proxyRequestWrapper(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const host = req.headers.host;
     if (!host) {
@@ -157,8 +183,8 @@ export class TunnelService extends EventEmitter {
       timestamp: new Date().toISOString()
     });
 
-    const tunnel = this.tunnels.get(subdomain);
-    if (!tunnel) {
+    const tunnelConfig = this.tunnels.get(subdomain);
+    if (!tunnelConfig) {
       logger.error(`No tunnel found for subdomain: ${subdomain}`, {
         availableTunnels: Array.from(this.tunnels.keys())
       });
@@ -168,17 +194,32 @@ export class TunnelService extends EventEmitter {
     }
 
     try {
-      const target = tunnel.targetUrl || (tunnel.targetPort ? `http://localhost:${tunnel.targetPort}` : undefined);
+      const target = tunnelConfig.targetUrl || (tunnelConfig.targetPort ? `http://localhost:${tunnelConfig.targetPort}` : undefined);
       if (!target) {
         logger.error(`No target URL or port found for tunnel: ${subdomain}`, {
           tunnel: {
-            subdomain: tunnel.subdomain,
-            targetPort: tunnel.targetPort,
-            targetUrl: tunnel.targetUrl
+            subdomain: tunnelConfig.subdomain,
+            targetPort: tunnelConfig.targetPort,
+            targetUrl: tunnelConfig.targetUrl
           }
         });
         res.writeHead(502);
         res.end(JSON.stringify({ error: 'Tunnel target not configured' }));
+        return;
+      }
+
+      // Validate target service availability
+      const isAvailable = await this.validateTargetService(target, tunnelConfig.targetPort!);
+      if (!isAvailable) {
+        logger.error(`Target service not available: ${target}`, {
+          subdomain,
+          port: tunnelConfig.targetPort
+        });
+        res.writeHead(502);
+        res.end(JSON.stringify({ 
+          error: 'Target service not available',
+          details: `Could not connect to service on port ${tunnelConfig.targetPort}. Make sure your service is running.`
+        }));
         return;
       }
 
@@ -188,7 +229,7 @@ export class TunnelService extends EventEmitter {
         url: req.url
       });
       
-      await this.handleProxyRequest(req, res, target);
+      await this.handleProxyRequest(req, res, target, tunnelConfig);
     } catch (error) {
       logger.error('Error in proxyRequest', { error, subdomain });
       res.statusCode = 500;
@@ -196,7 +237,7 @@ export class TunnelService extends EventEmitter {
     }
   }
 
-  private async handleProxyRequest(req: IncomingMessage, res: ServerResponse, target: string) {
+  private async handleProxyRequest(req: IncomingMessage, res: ServerResponse, target: string, tunnelConfig: TunnelConfig) {
     try {
       const proxy = httpProxy.createProxyServer({});
       
@@ -207,25 +248,58 @@ export class TunnelService extends EventEmitter {
           target,
           headers: req.headers,
           method: req.method,
-          url: req.url
+          url: req.url,
+          stack: err.stack
         });
 
-        // Check if the error is connection refused
+        // Handle specific error cases
         if (err.message.includes('ECONNREFUSED')) {
           logger.error('Target service not available', {
             target,
-            error: 'Connection refused'
+            error: 'Connection refused',
+            port: tunnelConfig.targetPort
           });
           res.writeHead(502);
           res.end(JSON.stringify({ 
             error: 'Target service not available',
-            details: 'Connection refused. Make sure the target service is running.'
+            details: `Connection refused to port ${tunnelConfig.targetPort}. Make sure your service is running and listening on the correct port.`
           }));
           return;
         }
 
+        if (err.message.includes('ECONNRESET')) {
+          logger.error('Connection reset by target', {
+            target,
+            error: 'Connection reset'
+          });
+          res.writeHead(504);
+          res.end(JSON.stringify({ 
+            error: 'Connection reset',
+            details: 'The target service unexpectedly closed the connection.'
+          }));
+          return;
+        }
+
+        if (err.message.includes('ETIMEDOUT')) {
+          logger.error('Connection timed out', {
+            target,
+            error: 'Timeout'
+          });
+          res.writeHead(504);
+          res.end(JSON.stringify({ 
+            error: 'Gateway timeout',
+            details: 'The target service took too long to respond.'
+          }));
+          return;
+        }
+
+        // Default error response
         res.writeHead(500);
-        res.end(JSON.stringify({ error: 'Proxy error', details: err.message }));
+        res.end(JSON.stringify({ 
+          error: 'Proxy error', 
+          details: err.message,
+          code: err.name
+        }));
       });
 
       proxy.web(req, res, {
