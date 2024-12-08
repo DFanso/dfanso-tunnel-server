@@ -179,7 +179,14 @@ export class TunnelService extends EventEmitter {
       // Handle WebSocket upgrade requests
       if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
         logger.info(`Handling WebSocket upgrade request for ${subdomain}`);
-        return this.handleWebSocketUpgrade(req, res, tunnelConfig);
+        const head = Buffer.from('');
+        if (!res.socket) {
+          logger.error('No socket found for WebSocket upgrade');
+          res.writeHead(500);
+          res.end('Internal Server Error: No socket available');
+          return Promise.resolve();
+        }
+        return this.handleWebSocketUpgrade(req, res.socket, head);
       }
 
       // Get request body as Buffer to handle binary data
@@ -238,30 +245,106 @@ export class TunnelService extends EventEmitter {
     });
   }
 
-  private async handleWebSocketUpgrade(req: IncomingMessage, res: ServerResponse, tunnelConfig: TunnelConfig): Promise<void> {
-    const message = {
-      type: 'upgrade',
-      path: req.url,
-      headers: req.headers
-    };
+  private async handleWebSocketUpgrade(req: IncomingMessage, socket: net.Socket, head: Buffer): Promise<void> {
+    const host = req.headers.host;
+    if (!host) {
+      socket.destroy();
+      return;
+    }
 
-    // Send upgrade request to client
-    tunnelConfig.ws.send(JSON.stringify(message));
+    const subdomain = host.split('.')[0];
+    const tunnelConfig = this.tunnels.get(subdomain);
 
-    // Wait for client to confirm upgrade
-    const response = await this.waitForResponse(tunnelConfig.ws);
-    if (response.type === 'upgrade-success') {
-      // Perform WebSocket upgrade
-      const upgradeHeader = {
-        'Upgrade': 'websocket',
-        'Connection': 'Upgrade',
-        'Sec-WebSocket-Accept': response.acceptKey
+    if (!tunnelConfig) {
+      socket.destroy();
+      return;
+    }
+
+    try {
+      // Send upgrade request to client
+      const upgradeMessage = {
+        type: 'upgrade',
+        path: req.url,
+        headers: {
+          ...req.headers,
+          'x-forwarded-proto': req.socket instanceof tls.TLSSocket ? 'wss' : 'ws',
+          'x-forwarded-for': req.socket.remoteAddress || '',
+          'x-real-ip': req.socket.remoteAddress || ''
+        }
       };
-      res.writeHead(101, upgradeHeader);
-      res.end();
-    } else {
-      res.writeHead(400);
-      res.end('WebSocket upgrade failed');
+
+      tunnelConfig.ws.send(JSON.stringify(upgradeMessage));
+
+      // Handle upgrade response from client
+      const cleanup = () => {
+        tunnelConfig.ws.removeListener('message', handleMessage);
+        socket.destroy();
+      };
+
+      const handleMessage = (data: string) => {
+        try {
+          const message = JSON.parse(data.toString());
+
+          if (message.type === 'upgrade-success') {
+            const { headers } = message;
+            
+            // Write upgrade response
+            const responseHeaders = [
+              'HTTP/1.1 101 Switching Protocols',
+              'Upgrade: websocket',
+              'Connection: Upgrade',
+              `Sec-WebSocket-Accept: ${headers['sec-websocket-accept']}`
+            ];
+
+            socket.write(responseHeaders.join('\r\n') + '\r\n\r\n');
+
+            // Setup WebSocket relay
+            tunnelConfig.ws.on('message', (wsData: string) => {
+              try {
+                const wsMessage = JSON.parse(wsData.toString());
+                if (wsMessage.type === 'ws-message') {
+                  const payload = wsMessage.isBase64 ? 
+                    Buffer.from(wsMessage.data, 'base64') : 
+                    wsMessage.data;
+                  socket.write(payload);
+                } else if (wsMessage.type === 'ws-close') {
+                  socket.end();
+                }
+              } catch (error) {
+                console.error('Error handling WebSocket relay:', error);
+              }
+            });
+
+            socket.on('data', (chunk: Buffer) => {
+              if (tunnelConfig.ws.readyState === WebSocket.OPEN) {
+                tunnelConfig.ws.send(JSON.stringify({
+                  type: 'ws-message',
+                  data: chunk.toString('base64'),
+                  isBase64: true
+                }));
+              }
+            });
+
+            socket.on('close', () => {
+              tunnelConfig.ws.send(JSON.stringify({ type: 'ws-close' }));
+            });
+
+          } else if (message.type === 'upgrade-failed') {
+            cleanup();
+          }
+        } catch (error) {
+          console.error('Error handling upgrade message:', error);
+          cleanup();
+        }
+      };
+
+      tunnelConfig.ws.on('message', handleMessage);
+      tunnelConfig.ws.on('close', cleanup);
+      socket.on('error', cleanup);
+
+    } catch (error) {
+      console.error('Error in WebSocket upgrade:', error);
+      socket.destroy();
     }
   }
 
@@ -341,6 +424,8 @@ export class TunnelService extends EventEmitter {
 
   private handleWebSocketConnection(ws: WebSocket, req: IncomingMessage) {
     console.log('New WebSocket connection established');
+    let chunkCount = 0;
+    let totalBytes = 0;
 
     ws.on('message', async (message: string) => {
       try {
@@ -351,6 +436,8 @@ export class TunnelService extends EventEmitter {
           const clientResponse = this.pendingResponses.get(ws);
           
           if (clientResponse) {
+            console.log(`Starting response: status=${statusCode}, encoding=${encoding || 'none'}, streaming=${isStreaming}`);
+            
             // Set response headers including content encoding if present
             if (encoding) {
               headers['content-encoding'] = encoding;
@@ -361,31 +448,57 @@ export class TunnelService extends EventEmitter {
             if (!isStreaming) {
               this.pendingResponses.delete(ws);
             }
+          } else {
+            console.error('No pending response found for response-start message');
           }
         } 
         else if (parsedMessage.type === 'response-chunk') {
           const clientResponse = this.pendingResponses.get(ws);
           if (clientResponse) {
             const { data, isBase64 } = parsedMessage;
-            const chunk = isBase64 ? Buffer.from(data, 'base64') : data;
-            clientResponse.write(chunk);
+            try {
+              const chunk = isBase64 ? Buffer.from(data, 'base64') : data;
+              totalBytes += chunk.length;
+              chunkCount++;
+              
+              if (chunkCount % 10 === 0) {
+                console.log(`Processed ${chunkCount} chunks, total bytes: ${totalBytes}`);
+              }
+              
+              clientResponse.write(chunk);
+            } catch (error) {
+              console.error('Error processing response chunk:', error);
+              throw error;
+            }
+          } else {
+            console.error('No pending response found for response-chunk message');
           }
         }
         else if (parsedMessage.type === 'response-end') {
           const clientResponse = this.pendingResponses.get(ws);
           if (clientResponse) {
+            console.log(`Response complete: processed ${chunkCount} chunks, total bytes: ${totalBytes}`);
             clientResponse.end();
             this.pendingResponses.delete(ws);
+            // Reset counters
+            chunkCount = 0;
+            totalBytes = 0;
+          } else {
+            console.error('No pending response found for response-end message');
           }
         }
         else if (parsedMessage.type === 'error') {
           console.error('Error from tunnel client:', parsedMessage.error);
           const clientResponse = this.pendingResponses.get(ws);
           if (clientResponse) {
-            clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+            clientResponse.writeHead(502, { 
+              'Content-Type': 'application/json',
+              'X-Tunnel-Error': 'true'
+            });
             clientResponse.end(JSON.stringify({
               error: 'Bad Gateway',
-              details: parsedMessage.error
+              details: parsedMessage.error,
+              timestamp: new Date().toISOString()
             }));
             this.pendingResponses.delete(ws);
           }
@@ -394,10 +507,14 @@ export class TunnelService extends EventEmitter {
         console.error('Error handling WebSocket message:', error);
         const clientResponse = this.pendingResponses.get(ws);
         if (clientResponse) {
-          clientResponse.writeHead(500, { 'Content-Type': 'application/json' });
+          clientResponse.writeHead(500, { 
+            'Content-Type': 'application/json',
+            'X-Tunnel-Error': 'true'
+          });
           clientResponse.end(JSON.stringify({
             error: 'Internal Server Error',
-            details: 'Error processing tunnel response'
+            details: 'Error processing tunnel response',
+            timestamp: new Date().toISOString()
           }));
           this.pendingResponses.delete(ws);
         }
@@ -408,10 +525,14 @@ export class TunnelService extends EventEmitter {
       console.log('WebSocket connection closed');
       const clientResponse = this.pendingResponses.get(ws);
       if (clientResponse) {
-        clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+        clientResponse.writeHead(502, { 
+          'Content-Type': 'application/json',
+          'X-Tunnel-Error': 'true'
+        });
         clientResponse.end(JSON.stringify({
           error: 'Bad Gateway',
-          details: 'Tunnel connection closed unexpectedly'
+          details: 'Tunnel connection closed unexpectedly',
+          timestamp: new Date().toISOString()
         }));
         this.pendingResponses.delete(ws);
       }
@@ -421,10 +542,15 @@ export class TunnelService extends EventEmitter {
       console.error('WebSocket error:', error);
       const clientResponse = this.pendingResponses.get(ws);
       if (clientResponse) {
-        clientResponse.writeHead(502, { 'Content-Type': 'application/json' });
+        clientResponse.writeHead(502, { 
+          'Content-Type': 'application/json',
+          'X-Tunnel-Error': 'true'
+        });
         clientResponse.end(JSON.stringify({
           error: 'Bad Gateway',
-          details: 'Tunnel connection error'
+          details: 'Tunnel connection error',
+          timestamp: new Date().toISOString(),
+          errorMessage: error.message
         }));
         this.pendingResponses.delete(ws);
       }
