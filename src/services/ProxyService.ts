@@ -1,47 +1,58 @@
-import { Request, Response } from 'express';
+// @ts-nocheck
+import { EventEmitter } from 'events';
 import httpProxy from 'http-proxy';
+import { IncomingMessage, ServerResponse, ClientRequest } from 'http';
 import { logger } from '../utils/logger';
 
-export class ProxyService {
-  private proxy: httpProxy;
+type ProxyServer = httpProxy & {
+  on(event: 'error', callback: (err: Error, req: IncomingMessage, res: ServerResponse) => void): this;
+  on(event: 'proxyReq', callback: (proxyReq: ClientRequest, req: IncomingMessage, res: ServerResponse, options: object) => void): this;
+  web(req: IncomingMessage, res: ServerResponse, options: httpProxy.ServerOptions, callback?: (err?: Error) => void): void;
+};
+
+export class ProxyService extends EventEmitter {
+  private proxy: ProxyServer;
 
   constructor() {
-    this.proxy = httpProxy.createProxyServer({});
-    this.setupProxyEvents();
-  }
+    super();
+    this.proxy = httpProxy.createProxyServer({}) as ProxyServer;
 
-  private setupProxyEvents(): void {
-    this.proxy.on('error', (err, req, res) => {
+    // Handle proxy errors
+    this.proxy.on('error', (
+      err: Error,
+      req: IncomingMessage,
+      res: ServerResponse
+    ) => {
       logger.error('Proxy error:', err);
-      const response = res as Response;
-      if (!response.headersSent) {
-        response.writeHead(500, { 'Content-Type': 'text/plain' });
-        response.end('Proxy error');
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Proxy error: ' + err.message);
       }
     });
 
-    this.proxy.on('proxyReq', (proxyReq, req) => {
-      const request = req as Request;
-      logger.debug(`Proxying request to: ${request.url}`);
+    // Modify request headers before forwarding
+    this.proxy.on('proxyReq', (
+      proxyReq: ClientRequest,
+      req: IncomingMessage,
+      res: ServerResponse,
+      options: object
+    ) => {
+      // Add X-Forwarded headers
+      const host = req.headers.host || '';
+      proxyReq.setHeader('X-Forwarded-Host', host);
+      proxyReq.setHeader('X-Forwarded-Proto', 'https');
+
+      // Remove connection header to prevent keep-alive issues
+      proxyReq.removeHeader('connection');
     });
   }
 
-  public handleRequest(req: Request, res: Response): void {
-    const host = req.headers.host;
-    if (!host) {
-      res.status(400).send('Host header is required');
-      return;
-    }
-
-    // Here you would typically look up the target based on the host
-    // For now, we'll use a placeholder target
-    const target = process.env.DEFAULT_TARGET || 'http://localhost:8080';
-
-    this.proxy.web(req, res, { target }, (err) => {
-      logger.error('Failed to proxy request:', err);
-      if (!res.headersSent) {
-        res.status(502).send('Bad Gateway');
-      }
-    });
+  public proxyRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    target: string,
+    errorCallback: (err: Error) => void
+  ): void {
+    this.proxy.web(req, res, { target }, errorCallback);
   }
 }

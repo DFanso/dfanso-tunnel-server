@@ -47,6 +47,24 @@ export class TunnelService extends EventEmitter {
     this.tunnels.delete(subdomain);
   }
 
+  public removeTunnelsForSocket(ws: WebSocket): void {
+    // Find and remove all tunnels associated with this WebSocket
+    for (const [subdomain, config] of this.tunnels.entries()) {
+      if (config.ws === ws) {
+        this.tunnels.delete(subdomain);
+        logger.info(`Removed tunnel for subdomain: ${subdomain}`);
+      }
+    }
+
+    // Also clean up any connections using this WebSocket
+    for (const [clientId, connWs] of this.connections.entries()) {
+      if (connWs === ws) {
+        this.connections.delete(clientId);
+        logger.info(`Removed connection: ${clientId}`);
+      }
+    }
+  }
+
   public clientReady(clientId: string): void {
     const connection = this.connections.get(clientId);
     if (connection) {

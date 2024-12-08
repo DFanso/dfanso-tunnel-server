@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const app = express();
 const port = 8000;
 
@@ -16,13 +17,17 @@ app.use((req, res, next) => {
 
 // GET endpoint
 app.get('/', (req, res) => {
-    res.send('Hello from test server!');
+    res.set("Content-Type", "text/plain");
+    res.set("Connection", "close");
+    res.status(200).send('Hello from test server!');
 });
 
 // POST endpoint
 app.post('/api/data', (req, res) => {
     console.log('Received POST data:', req.body);
-    res.json({
+    res.set("Content-Type", "application/json");
+    res.set("Connection", "close");
+    res.status(200).json({
         message: 'Data received successfully',
         data: req.body
     });
@@ -32,7 +37,9 @@ app.post('/api/data', (req, res) => {
 app.put('/api/update/:id', (req, res) => {
     const id = req.params.id;
     console.log(`Updating item ${id}:`, req.body);
-    res.json({
+    res.set("Content-Type", "application/json");
+    res.set("Connection", "close");
+    res.status(200).json({
         message: `Item ${id} updated successfully`,
         data: req.body
     });
@@ -42,7 +49,9 @@ app.put('/api/update/:id', (req, res) => {
 app.delete('/api/delete/:id', (req, res) => {
     const id = req.params.id;
     console.log(`Deleting item ${id}`);
-    res.json({
+    res.set("Content-Type", "application/json");
+    res.set("Connection", "close");
+    res.status(200).json({
         message: `Item ${id} deleted successfully`
     });
 });
@@ -51,7 +60,9 @@ app.delete('/api/delete/:id', (req, res) => {
 app.patch('/api/patch/:id', (req, res) => {
     const id = req.params.id;
     console.log(`Patching item ${id}:`, req.body);
-    res.json({
+    res.set("Content-Type", "application/json");
+    res.set("Connection", "close");
+    res.status(200).json({
         message: `Item ${id} patched successfully`,
         data: req.body
     });
@@ -59,10 +70,12 @@ app.patch('/api/patch/:id', (req, res) => {
 
 // OPTIONS endpoint
 app.options('/api/*', (req, res) => {
-    res.header('Allow', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.sendStatus(200);
+    res.set("Allow", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+    res.set("Connection", "close");
+    res.status(200).send();
 });
 
-app.listen(port, () => {
+const server = http.createServer(app);
+server.listen(port, () => {
     console.log(`Test server listening at http://localhost:${port}`);
 });

@@ -1,0 +1,20 @@
+[Unit]
+Description=Tunnel Server
+After=network.target
+
+[Service]
+Type=simple
+User=dfanso
+Environment=NODE_ENV=production
+Environment=DOMAIN=dfanso.dev
+Environment=HTTP_PORT=80
+Environment=HTTPS_PORT=443
+Environment=WS_PORT=8080
+Environment=SSL_DIR=/etc/letsencrypt/live/dfanso.dev
+WorkingDirectory=/opt/dfanso-tunnel-server
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

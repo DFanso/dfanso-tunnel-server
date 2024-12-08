@@ -1,7 +1,7 @@
-// src/server/HttpServer.ts
 import express from 'express';
 import * as http from 'http';
 import * as https from 'https';
+import * as spdy from 'spdy';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TunnelService } from '../services/TunnelService';
@@ -12,7 +12,8 @@ import cors from 'cors';
 
 export class HttpServer {
   private app: express.Application;
-  private server: http.Server | https.Server;
+  private server: http.Server | spdy.Server;
+  private isSecure: boolean = false;
 
   constructor(
     private port: number,
@@ -22,16 +23,21 @@ export class HttpServer {
     this.setupExpress();
 
     if (process.env.NODE_ENV === 'production') {
-      // In production, use HTTPS
+      // In production, use HTTPS with HTTP/2 support via SPDY
       const sslDir = process.env.SSL_DIR || './certs';
-      const server = https.createServer({
+      const options: spdy.ServerOptions = {
         key: fs.readFileSync(path.join(sslDir, 'privkey.pem')),
-        cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem'))
-      }, this.app);
+        cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem')),
+        spdy: {
+          protocols: ['h2', 'spdy/3.1', 'http/1.1'],
+          plain: false
+        }
+      };
       
-      this.server = server;
-      server.listen(port, () => {
-        logger.info(`HTTPS server listening on port ${port}`);
+      this.server = spdy.createServer(options, this.app);
+      this.isSecure = true;
+      this.server.listen(port, () => {
+        logger.info(`HTTPS/HTTP2 server listening on port ${port}`);
       });
     } else {
       // In development, use HTTP
@@ -39,6 +45,16 @@ export class HttpServer {
       this.server = server;
       server.listen(port, () => {
         logger.info(`HTTP server listening on port ${port}`);
+      });
+    }
+
+    // Add HTTPS redirect after server is initialized
+    if (this.isSecure) {
+      this.app.use((req, res, next) => {
+        if (!req.secure) {
+          return res.redirect(`https://${req.headers.host}${req.url}`);
+        }
+        next();
       });
     }
   }
@@ -66,6 +82,10 @@ export class HttpServer {
 
     // Handle tunnel requests
     this.app.use(async (req, res) => {
+      // Set proper headers for HTTP response
+      res.setHeader('Content-Type', 'text/html');
+      res.setHeader('Connection', 'keep-alive');
+      
       const host = req.headers.host;
       if (!host) {
         return res.status(400).send('No host header');
@@ -145,84 +165,69 @@ export class HttpServer {
 
         // Handle response from tunnel
         let responseStarted = false;
-        let responseHeaders: Record<string, string> = {};
 
         connection.ws.on('message', (data: Buffer | string) => {
           try {
             const message = JSON.parse(data.toString());
-            if (message.type === 'ready' && message.clientId === connection.clientId) {
-              // Headers received, start response
-              responseHeaders = message.headers || {};
-              res.writeHead(message.statusCode || 200, responseHeaders);
-              responseStarted = true;
-            } else if (message.type === 'data' && message.clientId === connection.clientId) {
-              clearTimeout(timeout);
-              if (!responseStarted) {
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                responseStarted = true;
-              }
-              res.write(Buffer.from(message.data, 'base64'));
-            } else if (message.type === 'end' && message.clientId === connection.clientId) {
-              res.end();
-              this.tunnelService.removeConnection(connection.clientId);
-            } else if (message.type === 'error' && message.clientId === connection.clientId) {
-              if (!responseStarted) {
-                res.status(502).send(`Tunnel error: ${message.error}`);
-                responseStarted = true;
-              }
-              this.tunnelService.removeConnection(connection.clientId);
+
+            switch (message.type) {
+              case 'ready':
+                if (!responseStarted) {
+                  responseStarted = true;
+                  clearTimeout(timeout);
+                  res.writeHead(message.statusCode, message.headers);
+                }
+                break;
+
+              case 'data':
+                if (responseStarted) {
+                  const chunk = Buffer.from(message.data, 'base64');
+                  res.write(chunk);
+                }
+                break;
+
+              case 'end':
+                if (responseStarted) {
+                  res.end();
+                  this.tunnelService.removeConnection(clientId);
+                }
+                break;
+
+              case 'error':
+                if (!responseStarted) {
+                  responseStarted = true;
+                  clearTimeout(timeout);
+                  res.status(502).send(`Tunnel error: ${message.error}`);
+                  this.tunnelService.removeConnection(clientId);
+                }
+                break;
             }
           } catch (err) {
-            logger.error('Error handling tunnel response:', err);
+            logger.error('Error processing tunnel response:', err);
             if (!responseStarted) {
-              res.status(500).send('Error processing tunnel response');
-            } else {
-              res.end();
+              responseStarted = true;
+              clearTimeout(timeout);
+              res.status(502).send('Invalid tunnel response');
+              this.tunnelService.removeConnection(clientId);
             }
-            this.tunnelService.removeConnection(connection.clientId);
           }
-        });
-
-        // Handle request body if any
-        let requestBody = '';
-        req.on('data', chunk => {
-          requestBody += chunk;
-        });
-
-        req.on('end', () => {
-          tunnel.ws.send(JSON.stringify({
-            type: 'connection',
-            clientId: connection.clientId,
-            method: req.method,
-            path: req.url,
-            headers: req.headers,
-            body: requestBody
-          }));
         });
 
       } catch (err) {
         logger.error('Error handling tunnel request:', err);
-        res.status(500).send('Internal server error');
+        return res.status(502).send('Tunnel error');
       }
     });
 
     // Redirect HTTP to HTTPS only if HTTPS is enabled
-    if (this.server instanceof https.Server) {
-      this.app.use((req, res, next) => {
-        if (!req.secure) {
-          return res.redirect(`https://${req.headers.host}${req.url}`);
-        }
-        next();
-      });
-    }
+    // Removed this block as it's now handled in the constructor
   }
 
-  public getServer(): http.Server | https.Server {
+  public getServer(): http.Server | spdy.Server {
     return this.server;
   }
 
   public stop() {
     this.server.close();
-    logger.info('Server stopped');
   }
 }
