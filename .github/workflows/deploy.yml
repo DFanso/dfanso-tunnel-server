@@ -34,35 +34,41 @@ jobs:
         DEPLOY_PATH: "/root/dfanso-tunnel-server"
         SSHPASS: ${{ secrets.VM_PASSWORD }}
       run: |
-        # Create deploy directory
+        echo "Starting deployment..."
+        
+        echo "Creating deploy directory..."
         sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "mkdir -p $DEPLOY_PATH"
         
-        # Copy files to VM using sshpass
+        echo "Copying files to VM..."
         sshpass -e rsync -azP --delete \
           -e "ssh -o StrictHostKeyChecking=no" \
           --exclude '.git' \
           --exclude 'node_modules' \
           ./ root@${{ secrets.VM_HOST }}:$DEPLOY_PATH/
         
-        # SSH into VM and update application
+        echo "Setting up application..."
         sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "cd $DEPLOY_PATH && \
-          # Install Node.js if not installed
+          echo '=== Checking Node.js installation ===' && \
           if ! command -v node &> /dev/null; then
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-            apt-get install -y nodejs
-            
-            # Verify installation
-            node --version
+            echo 'Installing Node.js...' && \
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+            apt-get install -y nodejs && \
+            echo 'Node.js installation complete:' && \
+            node --version && \
             npm --version
-          fi
+          else
+            echo 'Node.js is already installed:' && \
+            node --version && \
+            npm --version
+          fi && \
           
-          # Install PM2 globally
-          npm install -g pm2@latest
+          echo '=== Installing PM2 ===' && \
+          npm install -g pm2@latest && \
           
-          # Install dependencies
+          echo '=== Installing dependencies ===' && \
           npm ci --production && \
           
-          # Create ecosystem config with secrets
+          echo '=== Creating ecosystem config ===' && \
           cat > ecosystem.config.js << 'EOL'
           module.exports = {
             apps: [{
@@ -84,31 +90,33 @@ jobs:
           };
           EOL
           
-          # Ensure PM2 is in PATH
-          export PATH=$PATH:/usr/local/bin:/root/.npm-global/bin
+          echo '=== Setting up PM2 ===' && \
+          export PATH=$PATH:/usr/local/bin:/root/.npm-global/bin && \
           
-          # Initialize PM2
-          pm2 kill || true
+          echo 'Stopping any existing processes...' && \
+          pm2 kill || true && \
           
-          # Start new PM2 process with error checking
+          echo 'Starting application...' && \
           if ! pm2 start ecosystem.config.js; then
-            echo 'Failed to start PM2 process'
-            pm2 logs dfanso-tunnel --lines 50
+            echo 'Failed to start PM2 process' && \
+            pm2 logs dfanso-tunnel --lines 50 && \
             exit 1
-          fi
+          fi && \
           
-          # Save PM2 process list and set up startup
-          pm2 save
-          env PATH=$PATH:/usr/local/bin:/root/.npm-global/bin pm2 startup systemd -u root --hp /root
-          systemctl enable pm2-root
+          echo 'Setting up PM2 startup...' && \
+          pm2 save && \
+          env PATH=$PATH:/usr/local/bin:/root/.npm-global/bin pm2 startup systemd -u root --hp /root && \
+          systemctl enable pm2-root && \
           
-          # Check if process is running
+          echo 'Checking process status...' && \
           if ! pm2 pid dfanso-tunnel > /dev/null; then
-            echo 'PM2 process is not running'
-            pm2 logs dfanso-tunnel --lines 50
+            echo 'PM2 process is not running' && \
+            pm2 logs dfanso-tunnel --lines 50 && \
             exit 1
-          fi
+          fi && \
           
-          # Show process status and logs
-          pm2 list
-          pm2 logs dfanso-tunnel --lines 20"
+          echo '=== Final Status ===' && \
+          echo 'PM2 process list:' && \
+          pm2 list && \
+          echo 'Recent logs:' && \
+          pm2 logs dfanso-tunnel --lines 20 || true"
