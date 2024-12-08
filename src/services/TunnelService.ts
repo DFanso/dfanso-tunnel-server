@@ -6,6 +6,8 @@ import { logger } from '../utils/logger';
 import { TunnelConfig } from '../types/tunnel';
 import { IncomingMessage, ServerResponse } from 'http';
 import { ProxyService } from './ProxyService';
+import zlib from 'zlib';
+import { promisify } from 'util';
 
 interface Connection {
   clientId: string;
@@ -241,24 +243,37 @@ export class TunnelService extends EventEmitter {
 
         // Handle response
         if (response.type === 'response') {
-          // Ensure CORS headers for Next.js
-          const responseHeaders = {
-            ...response.headers,
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'X-Requested-With, Content-Type, Accept'
-          };
-
+          // Copy all headers from the proxied response
+          const responseHeaders = { ...response.headers };
+          
           logger.debug(`Sending response for ${subdomain}:`, {
             statusCode: response.statusCode,
-            headers: responseHeaders
+            headers: responseHeaders,
+            contentEncoding: responseHeaders['content-encoding']
           });
 
-          res.writeHead(response.statusCode, responseHeaders);
+          // Handle gzipped content
           if (response.data) {
-            const buffer = Buffer.from(response.data, 'base64');
-            res.end(buffer);
+            try {
+              const buffer = Buffer.from(response.data, 'base64');
+              
+              if (responseHeaders['content-encoding'] === 'gzip') {
+                // Keep the content-encoding header and send as-is
+                res.writeHead(response.statusCode, responseHeaders);
+                res.end(buffer);
+              } else {
+                // If it's not gzipped, send as normal
+                delete responseHeaders['content-encoding'];
+                res.writeHead(response.statusCode, responseHeaders);
+                res.end(buffer);
+              }
+            } catch (error) {
+              logger.error(`Error processing response data for ${subdomain}:`, error);
+              res.writeHead(502);
+              res.end(JSON.stringify({ error: 'Error processing response' }));
+            }
           } else {
+            res.writeHead(response.statusCode, responseHeaders);
             res.end();
           }
         } else if (response.type === 'error') {
