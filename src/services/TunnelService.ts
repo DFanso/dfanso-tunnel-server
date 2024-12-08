@@ -141,29 +141,76 @@ export class TunnelService extends EventEmitter {
   }
 
   private async validateTargetService(target: string, port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const socket = new net.Socket();
-      
-      socket.setTimeout(2000); // 2 second timeout
-      
-      socket.on('connect', () => {
-        socket.destroy();
-        resolve(true);
-      });
-      
-      socket.on('timeout', () => {
-        socket.destroy();
-        resolve(false);
-      });
-      
-      socket.on('error', () => {
-        socket.destroy();
-        resolve(false);
-      });
-      
-      const [host] = target.split(':');
-      socket.connect(port, host.replace(/^https?:\/\//, ''));
-    });
+    const maxRetries = 3;
+    const retryDelay = 1000; // 1 second
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger.info(`Validating target service (attempt ${attempt}/${maxRetries})`, {
+          target,
+          port
+        });
+
+        const isAvailable = await new Promise<boolean>((resolve) => {
+          const socket = new net.Socket();
+          
+          socket.setTimeout(2000); // 2 second timeout
+          
+          socket.on('connect', () => {
+            logger.info(`Successfully connected to target service`, {
+              target,
+              port,
+              attempt
+            });
+            socket.destroy();
+            resolve(true);
+          });
+          
+          socket.on('timeout', () => {
+            logger.warn(`Connection attempt timed out`, {
+              target,
+              port,
+              attempt
+            });
+            socket.destroy();
+            resolve(false);
+          });
+          
+          socket.on('error', (err) => {
+            logger.warn(`Connection attempt failed`, {
+              target,
+              port,
+              attempt,
+              error: err.message
+            });
+            socket.destroy();
+            resolve(false);
+          });
+          
+          const host = target.replace(/^https?:\/\//, '').split(':')[0];
+          logger.info(`Attempting to connect to ${host}:${port}`);
+          socket.connect(port, host);
+        });
+
+        if (isAvailable) {
+          return true;
+        }
+
+        if (attempt < maxRetries) {
+          logger.info(`Retrying connection after ${retryDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        }
+      } catch (error) {
+        logger.error(`Error during service validation`, {
+          target,
+          port,
+          attempt,
+          error
+        });
+      }
+    }
+
+    return false;
   }
 
   public async proxyRequestWrapper(req: IncomingMessage, res: ServerResponse): Promise<void> {
