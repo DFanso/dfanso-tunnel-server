@@ -11,6 +11,10 @@ import * as path from 'path';
 config();
 
 async function main() {
+  let httpServer: HttpServer | undefined;
+  let httpsServer: HttpServer | undefined;
+  let wsServer: WebSocketServer | undefined;
+
   try {
     let sslConfig: { key: Buffer; cert: Buffer } | undefined;
 
@@ -34,29 +38,50 @@ async function main() {
     // Initialize services
     const tunnelService = new TunnelService(sslConfig);
     const wsPort = parseInt(process.env.WS_PORT || '8080');
-    const httpPort = parseInt(process.env.HTTP_PORT || '3000');
+    const httpPort = parseInt(process.env.HTTP_PORT || '80');
+    const httpsPort = parseInt(process.env.HTTPS_PORT || '443');
 
     // Initialize servers
-    const wsServer = new WebSocketServer(tunnelService);
-    const httpServer = new HttpServer(httpPort, tunnelService);
+    wsServer = new WebSocketServer(tunnelService);
+    
+    if (process.env.NODE_ENV === 'production') {
+      // In production, create both HTTP (for redirect) and HTTPS servers
+      httpServer = new HttpServer(httpPort, tunnelService, false); // HTTP server for redirects
+      httpsServer = new HttpServer(httpsPort, tunnelService, true); // HTTPS server for main traffic
 
-    logger.info(`Environment: ${process.env.NODE_ENV}`);
-    logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
-    logger.info(`HTTP${process.env.NODE_ENV === 'production' ? 'S' : ''} server listening on port ${httpPort}`);
-    logger.info(`WebSocket${process.env.NODE_ENV === 'production' ? ' (SSL)' : ''} server listening on port ${wsPort}`);
+      logger.info(`Environment: ${process.env.NODE_ENV}`);
+      logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
+      logger.info(`HTTP server listening on port ${httpPort}`);
+      logger.info(`HTTPS server listening on port ${httpsPort}`);
+      logger.info(`WebSocket (SSL) server listening on port ${wsPort}`);
+    } else {
+      // In development, just create HTTP server
+      httpServer = new HttpServer(httpPort, tunnelService, false);
+
+      logger.info(`Environment: ${process.env.NODE_ENV}`);
+      logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
+      logger.info(`HTTP server listening on port ${httpPort}`);
+      logger.info(`WebSocket server listening on port ${wsPort}`);
+    }
 
     // Handle graceful shutdown
     const shutdown = () => {
       logger.info('Shutting down servers...');
-      httpServer.stop();
+      if (process.env.NODE_ENV === 'production') {
+        httpServer?.stop();
+        httpsServer?.stop();
+      } else {
+        httpServer?.stop();
+      }
+      wsServer?.stop();
       process.exit(0);
     };
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
 
-  } catch (err) {
-    logger.error('Failed to start server:', err);
+  } catch (error) {
+    logger.error('Failed to start server:', error);
     process.exit(1);
   }
 }

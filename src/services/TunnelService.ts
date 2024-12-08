@@ -4,6 +4,8 @@ import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
 import { TunnelConfig } from '../types/tunnel';
+import { IncomingMessage, ServerResponse } from 'http';
+import { ProxyService } from './ProxyService';
 
 interface Connection {
   clientId: string;
@@ -16,10 +18,12 @@ export class TunnelService extends EventEmitter {
   private tunnels: Map<string, TunnelConfig> = new Map();
   private connections: Map<string, WebSocket> = new Map();
   private sslConfig?: { key: Buffer; cert: Buffer };
+  private proxyService: ProxyService;
 
   constructor(sslConfig?: { key: Buffer; cert: Buffer }) {
     super();
     this.sslConfig = sslConfig;
+    this.proxyService = new ProxyService();
   }
 
   public getTunnels(): [string, TunnelConfig][] {
@@ -94,6 +98,75 @@ export class TunnelService extends EventEmitter {
       const connection = this.registerConnection(clientId, tunnel.ws);
       logger.info(`Created new connection ${clientId} for subdomain ${subdomain}`);
       resolve(connection);
+    });
+  }
+
+  public async proxyRequest(
+    tunnel: TunnelConfig,
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        // Send request through WebSocket
+        const clientId = uuidv4();
+        const connection = this.registerConnection(clientId, tunnel.ws);
+
+        // Forward the request through the tunnel
+        tunnel.ws.send(JSON.stringify({
+          type: 'request',
+          clientId,
+          method: req.method,
+          path: req.url,
+          headers: req.headers,
+          body: '' // Will be populated if needed
+        }));
+
+        // Set timeout for tunnel response
+        const timeout = setTimeout(() => {
+          this.removeConnection(clientId);
+          reject(new Error('Tunnel timeout'));
+        }, 30000);
+
+        // Handle response from tunnel
+        let responseStarted = false;
+
+        connection.ws.on('message', (data: Buffer | string) => {
+          try {
+            const message = JSON.parse(data.toString());
+
+            switch (message.type) {
+              case 'response':
+                if (!responseStarted) {
+                  responseStarted = true;
+                  clearTimeout(timeout);
+                  res.writeHead(message.statusCode, message.headers);
+                  if (message.data) {
+                    res.end(Buffer.from(message.data, 'base64'));
+                  } else {
+                    res.end();
+                  }
+                  this.removeConnection(clientId);
+                  resolve();
+                }
+                break;
+
+              case 'error':
+                clearTimeout(timeout);
+                this.removeConnection(clientId);
+                reject(new Error(message.error));
+                break;
+            }
+          } catch (err) {
+            clearTimeout(timeout);
+            this.removeConnection(clientId);
+            reject(err);
+          }
+        });
+
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 }
