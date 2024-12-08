@@ -44,7 +44,7 @@ async function main() {
 
     // Start WebSocket server for tunnel clients
     const wsServer = new WebSocketServer(
-      httpServer.getHttpServer(),
+      parseInt(WS_PORT),
       tunnelService
     );
 

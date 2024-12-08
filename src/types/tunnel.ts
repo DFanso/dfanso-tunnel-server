@@ -1,3 +1,5 @@
+import { WebSocket } from 'ws';
+
 export interface TunnelMessage {
   type: 'register' | 'data' | 'close';
   tunnelId: string;
@@ -5,15 +7,8 @@ export interface TunnelMessage {
 }
 
 export interface TunnelConfig {
-  id: string;
-  domain: string;
-  targetPort: number;
-  protocol: 'http' | 'https';
-  clientId?: string;
-  ssl?: boolean;
-  created?: Date;
-  active?: boolean;
-  options?: TunnelOptions;
+  subdomain: string;
+  ws: WebSocket;
 }
 
 export interface TunnelStats {
