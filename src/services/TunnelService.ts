@@ -177,29 +177,19 @@ export class TunnelService extends EventEmitter {
 
         // Prepare headers for Next.js compatibility
         const headers = { ...req.headers };
+        delete headers['content-length']; // Let Node.js calculate this
         
         // Ensure proper forwarding headers are set
-        const proto = req.headers['x-forwarded-proto'] || 'https';
-        headers['x-forwarded-proto'] = proto;
+        headers['x-forwarded-proto'] = 'https';
         headers['x-forwarded-host'] = host;
-        headers['x-forwarded-port'] = '443';
         headers['x-forwarded-for'] = req.socket.remoteAddress || '';
-        
-        // Next.js specific headers
         headers['x-real-ip'] = req.socket.remoteAddress || '';
-        headers['x-nextjs-data'] = '1';
-
-        // Handle Next.js specific paths
-        let path = req.url || '/';
-        if (path.startsWith('/_next/')) {
-          logger.debug(`Next.js asset request: ${path}`);
-        }
 
         const message = {
           type: 'request',
           clientId: Math.random().toString(36).substring(7),
           method: req.method,
-          path,
+          path: req.url || '/',
           headers,
           body
         };
@@ -228,8 +218,7 @@ export class TunnelService extends EventEmitter {
           const handleMessage = (data: WebSocket.Data) => {
             try {
               const message = JSON.parse(data.toString());
-              logger.debug(`Received tunnel response for ${subdomain}:`, { message });
-              if (message.clientId === message.clientId) {
+              if (message.type === 'response') {
                 cleanup();
                 resolve(message);
               }
@@ -243,34 +232,33 @@ export class TunnelService extends EventEmitter {
 
         // Handle response
         if (response.type === 'response') {
-          // Copy all headers from the proxied response
           const responseHeaders = { ...response.headers };
-          
-          logger.debug(`Sending response for ${subdomain}:`, {
-            statusCode: response.statusCode,
-            headers: responseHeaders,
-            contentEncoding: responseHeaders['content-encoding']
-          });
+          delete responseHeaders['content-length']; // Let Node.js calculate this
 
-          // Handle gzipped content
           if (response.data) {
             try {
-              const buffer = Buffer.from(response.data, 'base64');
+              let buffer = Buffer.from(response.data, 'base64');
               
+              // If the content is gzipped, send it as-is
               if (responseHeaders['content-encoding'] === 'gzip') {
-                // Keep the content-encoding header and send as-is
                 res.writeHead(response.statusCode, responseHeaders);
                 res.end(buffer);
               } else {
-                // If it's not gzipped, send as normal
+                // If it's not gzipped, we need to handle the raw content
                 delete responseHeaders['content-encoding'];
                 res.writeHead(response.statusCode, responseHeaders);
                 res.end(buffer);
               }
+              
+              logger.debug(`Response sent for ${subdomain}:`, {
+                statusCode: response.statusCode,
+                contentLength: buffer.length,
+                headers: responseHeaders
+              });
             } catch (error) {
               logger.error(`Error processing response data for ${subdomain}:`, error);
               res.writeHead(502);
-              res.end(JSON.stringify({ error: 'Error processing response' }));
+              res.end(JSON.stringify({ error: 'Error processing response data' }));
             }
           } else {
             res.writeHead(response.statusCode, responseHeaders);
