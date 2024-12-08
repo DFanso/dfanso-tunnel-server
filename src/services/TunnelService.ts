@@ -141,76 +141,9 @@ export class TunnelService extends EventEmitter {
   }
 
   private async validateTargetService(target: string, port: number): Promise<boolean> {
-    const maxRetries = 3;
-    const retryDelay = 1000; // 1 second
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        logger.info(`Validating target service (attempt ${attempt}/${maxRetries})`, {
-          target,
-          port
-        });
-
-        const isAvailable = await new Promise<boolean>((resolve) => {
-          const socket = new net.Socket();
-          
-          socket.setTimeout(2000); // 2 second timeout
-          
-          socket.on('connect', () => {
-            logger.info(`Successfully connected to target service`, {
-              target,
-              port,
-              attempt
-            });
-            socket.destroy();
-            resolve(true);
-          });
-          
-          socket.on('timeout', () => {
-            logger.warn(`Connection attempt timed out`, {
-              target,
-              port,
-              attempt
-            });
-            socket.destroy();
-            resolve(false);
-          });
-          
-          socket.on('error', (err) => {
-            logger.warn(`Connection attempt failed`, {
-              target,
-              port,
-              attempt,
-              error: err.message
-            });
-            socket.destroy();
-            resolve(false);
-          });
-          
-          const host = target.replace(/^https?:\/\//, '').split(':')[0];
-          logger.info(`Attempting to connect to ${host}:${port}`);
-          socket.connect(port, host);
-        });
-
-        if (isAvailable) {
-          return true;
-        }
-
-        if (attempt < maxRetries) {
-          logger.info(`Retrying connection after ${retryDelay}ms...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-        }
-      } catch (error) {
-        logger.error(`Error during service validation`, {
-          target,
-          port,
-          attempt,
-          error
-        });
-      }
-    }
-
-    return false;
+    // In a VM setup, we can't directly validate the client's local port
+    // Instead, we'll trust that the client has verified its local port
+    return true;
   }
 
   public async proxyRequestWrapper(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -241,168 +174,74 @@ export class TunnelService extends EventEmitter {
     }
 
     try {
-      const target = tunnelConfig.targetUrl || (tunnelConfig.targetPort ? `http://localhost:${tunnelConfig.targetPort}` : undefined);
-      if (!target) {
-        logger.error(`No target URL or port found for tunnel: ${subdomain}`, {
-          tunnel: {
-            subdomain: tunnelConfig.subdomain,
-            targetPort: tunnelConfig.targetPort,
-            targetUrl: tunnelConfig.targetUrl
-          }
-        });
-        res.writeHead(502);
-        res.end(JSON.stringify({ error: 'Tunnel target not configured' }));
-        return;
-      }
+      // In a VM setup, we need to use WebSocket to forward the request to the client
+      const message = {
+        type: 'request',
+        method: req.method,
+        path: req.url,
+        headers: req.headers,
+        body: await this.getRequestBody(req)
+      };
 
-      // Validate target service availability
-      const isAvailable = await this.validateTargetService(target, tunnelConfig.targetPort!);
-      if (!isAvailable) {
-        logger.error(`Target service not available: ${target}`, {
-          subdomain,
-          port: tunnelConfig.targetPort
-        });
-        res.writeHead(502);
-        res.end(JSON.stringify({ 
-          error: 'Target service not available',
-          details: `Could not connect to service on port ${tunnelConfig.targetPort}. Make sure your service is running.`
-        }));
-        return;
-      }
-
-      logger.info(`Forwarding request to target: ${target}`, {
+      logger.info(`Forwarding request via WebSocket`, {
         subdomain,
         method: req.method,
-        url: req.url
+        url: req.url,
+        targetPort: tunnelConfig.targetPort
       });
-      
-      await this.handleProxyRequest(req, res, target, tunnelConfig);
+
+      // Send the request to the client via WebSocket
+      tunnelConfig.ws.send(JSON.stringify(message));
+
+      // Wait for the response from the client
+      const response = await this.waitForResponse(tunnelConfig.ws);
+
+      // Forward the response back to the original requester
+      res.writeHead(response.statusCode, response.headers);
+      res.end(response.body);
+
     } catch (error) {
       logger.error('Error in proxyRequest', { error, subdomain });
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'Proxy request failed' }));
+      res.statusCode = 502;
+      res.end(JSON.stringify({ 
+        error: 'Bad Gateway',
+        details: 'Error communicating with the client tunnel'
+      }));
     }
   }
 
-  private async handleProxyRequest(req: IncomingMessage, res: ServerResponse, target: string, tunnelConfig: TunnelConfig) {
-    try {
-      const proxy = httpProxy.createProxyServer({});
-      
-      // Add error handler for proxy errors
-      proxy.on('error', (err: Error, req: IncomingMessage, res: ServerResponse) => {
-        logger.error('Proxy error', {
-          error: err.message,
-          target,
-          headers: req.headers,
-          method: req.method,
-          url: req.url,
-          stack: err.stack
-        });
-
-        // Handle specific error cases
-        if (err.message.includes('ECONNREFUSED')) {
-          logger.error('Target service not available', {
-            target,
-            error: 'Connection refused',
-            port: tunnelConfig.targetPort
-          });
-          res.writeHead(502);
-          res.end(JSON.stringify({ 
-            error: 'Target service not available',
-            details: `Connection refused to port ${tunnelConfig.targetPort}. Make sure your service is running and listening on the correct port.`
-          }));
-          return;
-        }
-
-        if (err.message.includes('ECONNRESET')) {
-          logger.error('Connection reset by target', {
-            target,
-            error: 'Connection reset'
-          });
-          res.writeHead(504);
-          res.end(JSON.stringify({ 
-            error: 'Connection reset',
-            details: 'The target service unexpectedly closed the connection.'
-          }));
-          return;
-        }
-
-        if (err.message.includes('ETIMEDOUT')) {
-          logger.error('Connection timed out', {
-            target,
-            error: 'Timeout'
-          });
-          res.writeHead(504);
-          res.end(JSON.stringify({ 
-            error: 'Gateway timeout',
-            details: 'The target service took too long to respond.'
-          }));
-          return;
-        }
-
-        // Default error response
-        res.writeHead(500);
-        res.end(JSON.stringify({ 
-          error: 'Proxy error', 
-          details: err.message,
-          code: err.name
-        }));
+  private getRequestBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve) => {
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
       });
-
-      proxy.web(req, res, {
-        target,
-        secure: false,
-        changeOrigin: true,
-        selfHandleResponse: true,
-        ws: false // Disable WebSocket upgrade for HTTP requests
+      req.on('end', () => {
+        resolve(body);
       });
+    });
+  }
 
-      proxy.on('proxyRes', (proxyRes: IncomingMessage, req: IncomingMessage, res: ServerResponse) => {
-        const chunks: Buffer[] = [];
-        
-        proxyRes.on('data', (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
+  private waitForResponse(ws: WebSocket): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Response timeout'));
+      }, 30000); // 30 second timeout
 
-        proxyRes.on('end', async () => {
-          try {
-            const buffer = Buffer.concat(chunks);
-            const encoding = proxyRes.headers['content-encoding'];
-
-            // Copy all headers except content-length (let Node calculate it)
-            Object.keys(proxyRes.headers).forEach(key => {
-              if (key.toLowerCase() !== 'content-length') {
-                res.setHeader(key, proxyRes.headers[key]!);
-              }
-            });
-
-            // Set status code
-            res.statusCode = proxyRes.statusCode || 200;
-
-            // Log response details
-            logger.info('Proxying response', {
-              statusCode: proxyRes.statusCode,
-              contentEncoding: encoding,
-              contentLength: buffer.length,
-              headers: proxyRes.headers,
-              target
-            });
-
-            // Send the response
-            res.end(buffer);
-
-          } catch (error) {
-            logger.error('Error processing proxy response', { error, target });
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: 'Error processing response' }));
+      const messageHandler = (data: WebSocket.Data) => {
+        try {
+          const response = JSON.parse(data.toString());
+          if (response.type === 'response') {
+            clearTimeout(timeout);
+            ws.removeListener('message', messageHandler);
+            resolve(response);
           }
-        });
-      });
+        } catch (error) {
+          logger.error('Error parsing response', { error });
+        }
+      };
 
-    } catch (error) {
-      logger.error('Error in handleProxyRequest', { error, target });
-      res.statusCode = 500;
-      res.end(JSON.stringify({ error: 'Proxy request failed' }));
-    }
+      ws.on('message', messageHandler);
+    });
   }
 }
