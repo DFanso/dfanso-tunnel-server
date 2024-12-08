@@ -56,6 +56,9 @@ jobs:
             npm --version
           fi
           
+          # Install PM2 globally
+          npm install -g pm2@latest
+          
           # Install dependencies
           npm ci --production && \
           
@@ -81,14 +84,11 @@ jobs:
           };
           EOL
           
-          # Install PM2 globally if not installed
-          if ! command -v pm2 &> /dev/null; then
-            npm install -g pm2
-          fi
+          # Ensure PM2 is in PATH
+          export PATH=$PATH:/usr/local/bin:/root/.npm-global/bin
           
-          # Stop existing PM2 process if running
-          pm2 stop dfanso-tunnel || true
-          pm2 delete dfanso-tunnel || true
+          # Initialize PM2
+          pm2 kill || true
           
           # Start new PM2 process with error checking
           if ! pm2 start ecosystem.config.js; then
@@ -99,7 +99,8 @@ jobs:
           
           # Save PM2 process list and set up startup
           pm2 save
-          pm2 startup
+          env PATH=$PATH:/usr/local/bin:/root/.npm-global/bin pm2 startup systemd -u root --hp /root
+          systemctl enable pm2-root
           
           # Check if process is running
           if ! pm2 pid dfanso-tunnel > /dev/null; then
@@ -108,6 +109,6 @@ jobs:
             exit 1
           fi
           
-          # Show process status
+          # Show process status and logs
           pm2 list
           pm2 logs dfanso-tunnel --lines 20"
