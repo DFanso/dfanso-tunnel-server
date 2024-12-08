@@ -2,8 +2,8 @@ const WebSocket = require('ws');
 const http = require('http');
 
 // Configuration
-const SERVER_IP = 'localhost';  // Using localhost for testing
-const TUNNEL_SERVER = `ws://${SERVER_IP}:8080`;  // Using ws:// for local testing
+const SERVER_IP = 'dfanso.dev';  // Your domain
+const TUNNEL_SERVER = `wss://${SERVER_IP}:8080`;  // Using secure WebSocket
 const LOCAL_PORT = 8000;
 const SUBDOMAIN = 'test';
 
@@ -11,7 +11,6 @@ function connectWebSocket() {
   console.log('Connecting to:', TUNNEL_SERVER);
   
   const ws = new WebSocket(TUNNEL_SERVER, {
-    rejectUnauthorized: false,  // Temporarily disable SSL verification for testing
     headers: {
       'Host': 'dfanso.dev'
     }

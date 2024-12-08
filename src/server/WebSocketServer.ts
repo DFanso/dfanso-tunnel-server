@@ -1,12 +1,14 @@
 import WebSocket, { WebSocketServer as WSServer, Data } from 'ws';
 import { logger } from '../utils/logger';
 import { TunnelService } from '../services/TunnelService';
+import * as http from 'http';
 import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
 
 export class WebSocketServer {
   private wss: WSServer;
+  private server: http.Server | https.Server;
 
   constructor(private tunnelService: TunnelService) {
     const port = parseInt(process.env.WS_PORT || '8080');
@@ -14,19 +16,22 @@ export class WebSocketServer {
     if (process.env.NODE_ENV === 'production') {
       // In production, use SSL
       const sslDir = process.env.SSL_DIR || './certs';
-      const server = https.createServer({
+      this.server = https.createServer({
         key: fs.readFileSync(path.join(sslDir, 'privkey.pem')),
         cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem'))
       });
-
-      this.wss = new WSServer({ server });
-      server.listen(port);
-      logger.info(`WebSocket server (SSL) listening on port ${port}`);
     } else {
-      // In development, no SSL
-      this.wss = new WSServer({ port });
-      logger.info(`WebSocket server listening on port ${port}`);
+      // In development, use HTTP
+      this.server = http.createServer();
     }
+
+    this.wss = new WSServer({ server: this.server });
+    
+    // Start listening
+    this.server.listen(port, () => {
+      logger.info(`WebSocket server${process.env.NODE_ENV === 'production' ? ' (SSL)' : ''} listening on port ${port}`);
+    });
+
     this.initialize();
   }
 
@@ -49,19 +54,19 @@ export class WebSocketServer {
       });
 
       ws.on('close', () => {
-        // Find and remove any tunnels associated with this WebSocket
-        const tunnels = this.tunnelService.getTunnels();
-        for (const [subdomain, config] of tunnels) {
-          if (config.ws === ws) {
-            this.tunnelService.removeTunnel(subdomain);
-            logger.info(`Removed tunnel for subdomain: ${subdomain}`);
-          }
-        }
+        logger.info('WebSocket connection closed');
+        // Remove any tunnels associated with this connection
+        this.tunnelService.removeTunnelsForSocket(ws);
       });
 
       ws.on('error', (err) => {
         logger.error('WebSocket error:', err);
       });
     });
+  }
+
+  public stop(): void {
+    this.wss.close();
+    this.server.close();
   }
 }
