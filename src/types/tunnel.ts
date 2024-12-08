@@ -9,6 +9,8 @@ export interface TunnelMessage {
 export interface TunnelConfig {
   subdomain: string;
   ws: WebSocket;
+  targetUrl?: string;
+  targetPort?: number;
 }
 
 export interface TunnelStats {

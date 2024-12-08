@@ -8,6 +8,8 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { ProxyService } from './ProxyService';
 import zlib from 'zlib';
 import { promisify } from 'util';
+import * as http from 'http';
+const httpProxy = require('http-proxy');
 
 interface Connection {
   clientId: string;
@@ -134,7 +136,7 @@ export class TunnelService extends EventEmitter {
     });
   }
 
-  public proxyRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  public async proxyRequestWrapper(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const host = req.headers.host;
     if (!host) {
       logger.error('No host header found in request');
@@ -160,123 +162,79 @@ export class TunnelService extends EventEmitter {
       return Promise.resolve();
     }
 
-    return new Promise<void>(async (resolve, reject) => {
-      try {
-        // Get request body if present
-        let body = '';
-        if (req.method !== 'GET' && req.method !== 'HEAD') {
-          body = await new Promise<string>((resolve, reject) => {
-            let data = '';
-            req.on('data', chunk => {
-              data += chunk;
-            });
-            req.on('end', () => resolve(data));
-            req.on('error', reject);
-          });
-        }
+    try {
+      const target = tunnel.targetUrl || (tunnel.targetPort ? `http://localhost:${tunnel.targetPort}` : undefined);
+      if (!target) {
+        logger.error(`No target URL or port found for tunnel: ${subdomain}`);
+        res.writeHead(502);
+        res.end(JSON.stringify({ error: 'Tunnel target not configured' }));
+        return;
+      }
+      
+      await this.handleProxyRequest(req, res, target);
+    } catch (error) {
+      logger.error('Error in proxyRequest', { error });
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Proxy request failed' }));
+    }
+  }
 
-        // Prepare headers for Next.js compatibility
-        const headers = { ...req.headers };
-        delete headers['content-length']; // Let Node.js calculate this
+  private async handleProxyRequest(req: IncomingMessage, res: ServerResponse, target: string) {
+    try {
+      const proxy = httpProxy.createProxyServer({});
+      
+      proxy.web(req, res, {
+        target,
+        secure: false,
+        changeOrigin: true,
+        selfHandleResponse: true
+      });
+
+      proxy.on('proxyRes', (proxyRes: IncomingMessage, req: IncomingMessage, res: ServerResponse) => {
+        const chunks: Buffer[] = [];
         
-        // Ensure proper forwarding headers are set
-        headers['x-forwarded-proto'] = 'https';
-        headers['x-forwarded-host'] = host;
-        headers['x-forwarded-for'] = req.socket.remoteAddress || '';
-        headers['x-real-ip'] = req.socket.remoteAddress || '';
-
-        const message = {
-          type: 'request',
-          clientId: Math.random().toString(36).substring(7),
-          method: req.method,
-          path: req.url || '/',
-          headers,
-          body
-        };
-
-        logger.debug(`Sending tunnel message for ${subdomain}:`, { message });
-        tunnel.ws.send(JSON.stringify(message));
-
-        // Wait for response
-        const response = await new Promise<{
-          type: string;
-          statusCode: number;
-          headers: Record<string, string | string[]>;
-          data?: string;
-          error?: string;
-        }>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Tunnel timeout'));
-            cleanup();
-          }, 30000);
-
-          const cleanup = () => {
-            tunnel.ws.removeListener('message', handleMessage);
-            clearTimeout(timeout);
-          };
-
-          const handleMessage = (data: WebSocket.Data) => {
-            try {
-              const message = JSON.parse(data.toString());
-              if (message.type === 'response') {
-                cleanup();
-                resolve(message);
-              }
-            } catch (err) {
-              logger.error('Error parsing tunnel response:', err);
-            }
-          };
-
-          tunnel.ws.on('message', handleMessage);
+        proxyRes.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
         });
 
-        // Handle response
-        if (response.type === 'response') {
-          const responseHeaders = { ...response.headers };
-          delete responseHeaders['content-length']; // Let Node.js calculate this
+        proxyRes.on('end', async () => {
+          try {
+            const buffer = Buffer.concat(chunks);
+            const encoding = proxyRes.headers['content-encoding'];
 
-          if (response.data) {
-            try {
-              let buffer = Buffer.from(response.data, 'base64');
-              
-              // If the content is gzipped, send it as-is
-              if (responseHeaders['content-encoding'] === 'gzip') {
-                res.writeHead(response.statusCode, responseHeaders);
-                res.end(buffer);
-              } else {
-                // If it's not gzipped, we need to handle the raw content
-                delete responseHeaders['content-encoding'];
-                res.writeHead(response.statusCode, responseHeaders);
-                res.end(buffer);
+            // Copy all headers except content-length (let Node calculate it)
+            Object.keys(proxyRes.headers).forEach(key => {
+              if (key.toLowerCase() !== 'content-length') {
+                res.setHeader(key, proxyRes.headers[key]!);
               }
-              
-              logger.debug(`Response sent for ${subdomain}:`, {
-                statusCode: response.statusCode,
-                contentLength: buffer.length,
-                headers: responseHeaders
-              });
-            } catch (error) {
-              logger.error(`Error processing response data for ${subdomain}:`, error);
-              res.writeHead(502);
-              res.end(JSON.stringify({ error: 'Error processing response data' }));
-            }
-          } else {
-            res.writeHead(response.statusCode, responseHeaders);
-            res.end();
+            });
+
+            // Set status code
+            res.statusCode = proxyRes.statusCode || 200;
+
+            // Log response details
+            logger.info('Proxying response', {
+              statusCode: proxyRes.statusCode,
+              contentEncoding: encoding,
+              contentLength: buffer.length,
+              headers: proxyRes.headers
+            });
+
+            // Send the response
+            res.end(buffer);
+
+          } catch (error) {
+            logger.error('Error processing proxy response', { error });
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: 'Error processing response' }));
           }
-        } else if (response.type === 'error') {
-          logger.error(`Tunnel error for ${subdomain}:`, response.error);
-          res.writeHead(502);
-          res.end(JSON.stringify({ error: 'Tunnel error', details: response.error }));
-        }
-        resolve();
-      } catch (err) {
-        const error = err as Error;
-        logger.error(`Error handling request for ${subdomain}:`, error);
-        res.writeHead(500);
-        res.end(JSON.stringify({ error: 'Internal server error', details: error.message }));
-        reject(error);
-      }
-    });
+        });
+      });
+
+    } catch (error) {
+      logger.error('Error in proxyRequest', { error });
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Proxy request failed' }));
+    }
   }
 }
