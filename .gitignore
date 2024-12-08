@@ -128,3 +128,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+.DS_Store
+certs/fullchain.pem
+certs/privkey.pem
