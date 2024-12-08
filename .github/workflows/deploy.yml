@@ -46,6 +46,16 @@ jobs:
         
         # SSH into VM and update application
         sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "cd $DEPLOY_PATH && \
+          # Install Node.js if not installed
+          if ! command -v node &> /dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+            apt-get install -y nodejs
+            
+            # Verify installation
+            node --version
+            npm --version
+          fi
+          
           # Install dependencies
           npm ci --production && \
           
