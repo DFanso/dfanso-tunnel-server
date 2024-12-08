@@ -24,6 +24,7 @@ Internet (HTTPS) -> Tunnel Server (dfanso.dev) -> WebSocket -> Local Server
 - Node.js 16+
 - Let's Encrypt SSL certificate
 - Domain with wildcard DNS (*.dfanso.dev)
+- Add a CNAME record for your domain to point to the tunnel server 
 
 ### Installation
 
@@ -58,6 +59,26 @@ sudo apt-get install certbot
 sudo certbot certonly --manual --preferred-challenges dns -d *.dfanso.dev -d dfanso.dev
 ```
 
+
+```bash
+# First install the Cloudflare certbot plugin
+sudo apt install python3-certbot-dns-cloudflare  # for Ubuntu/Debian
+
+# Create a Cloudflare API token configuration file
+sudo mkdir -p /etc/cloudflare
+sudo nano /etc/cloudflare/cloudflare.ini
+
+# Add these lines to cloudflare.ini:
+# dns_cloudflare_email = your-cloudflare-email@example.com
+# dns_cloudflare_api_key = your-global-api-key
+
+# Secure the file
+sudo chmod 600 /etc/cloudflare/cloudflare.ini
+
+# Then run certbot with the Cloudflare plugin
+sudo certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/cloudflare/cloudflare.ini -d *.dfanso.dev -d dfanso.dev
+```
+
 3. Follow certbot instructions to add DNS TXT records
 
 ### Running the Server
@@ -81,7 +102,7 @@ The recommended way to connect to this tunnel server is using our official npm p
 
 1. Install the package:
 ```bash
-npm install @dfanso/tunnel-client
+npm install @dfanso/tunnel-client@1.0.2
 ```
 
 2. Basic usage:

@@ -1,0 +1,119 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ rebase/dev ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Build
+      run: npm run build
+      
+    - name: Install sshpass
+      run: sudo apt-get install sshpass
+      
+    - name: Deploy to VM
+      env:
+        VM_HOST: ${{ secrets.VM_HOST }}
+        VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        DEPLOY_PATH: "/root/dfanso-tunnel-server"
+        SSHPASS: ${{ secrets.VM_PASSWORD }}
+      run: |
+        echo "Starting deployment..."
+        
+        echo "Creating deploy directory..."
+        sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "mkdir -p $DEPLOY_PATH"
+        
+        echo "Copying files to VM..."
+        sshpass -e rsync -azP --delete \
+          -e "ssh -o StrictHostKeyChecking=no" \
+          --exclude '.git' \
+          --exclude 'node_modules' \
+          ./ root@${{ secrets.VM_HOST }}:$DEPLOY_PATH/
+        
+        echo "Setting up application..."
+        sshpass -e ssh -o StrictHostKeyChecking=no root@${{ secrets.VM_HOST }} "cd $DEPLOY_PATH && \
+          echo '=== Checking Node.js installation ===' && \
+          if ! command -v node &> /dev/null; then
+            echo 'Installing Node.js...' && \
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+            apt-get install -y nodejs && \
+            echo 'Node.js installation complete:' && \
+            node --version && \
+            npm --version
+          else
+            echo 'Node.js is already installed:' && \
+            node --version && \
+            npm --version
+          fi && \
+          
+          echo '=== Installing PM2 ===' && \
+          npm install -g pm2@latest && \
+          
+          echo '=== Installing dependencies ===' && \
+          npm ci --production && \
+          
+          echo '=== Creating ecosystem config ===' && \
+          echo 'module.exports = {
+            apps: [{
+              name: \"dfanso-tunnel\",
+              script: \"./dist/index.js\",
+              instances: 1,
+              autorestart: true,
+              watch: true,
+              max_memory_restart: \"1G\",
+              env: {
+                NODE_ENV: \"${{ secrets.NODE_ENV }}\",
+                DOMAIN: \"${{ secrets.DOMAIN }}\",
+                WS_PORT: \"${{ secrets.WS_PORT }}\",
+                HTTP_PORT: \"${{ secrets.HTTP_PORT }}\",
+                HTTPS_PORT: \"${{ secrets.HTTPS_PORT }}\",
+                SSL_DIR: \"${{ secrets.SSL_DIR }}\"
+              }
+            }]
+          };' > ecosystem.config.js && \
+          
+          echo '=== Setting up PM2 ===' && \
+          export PATH=$PATH:/usr/local/bin:/root/.npm-global/bin && \
+          
+          echo 'Stopping any existing processes...' && \
+          pm2 kill || true && \
+          
+          echo 'Starting application...' && \
+          if ! pm2 start ecosystem.config.js; then
+            echo 'Failed to start PM2 process' && \
+            pm2 logs dfanso-tunnel --lines 50 && \
+            exit 1
+          fi && \
+          
+          echo 'Setting up PM2 startup...' && \
+          pm2 save && \
+          env PATH=$PATH:/usr/local/bin:/root/.npm-global/bin pm2 startup systemd -u root --hp /root && \
+          systemctl enable pm2-root && \
+          
+          echo 'Checking process status...' && \
+          if ! pm2 pid dfanso-tunnel > /dev/null; then
+            echo 'PM2 process is not running' && \
+            pm2 logs dfanso-tunnel --lines 50 && \
+            exit 1
+          fi && \
+          
+          echo '=== Final Status ===' && \
+          echo 'PM2 process list:' && \
+          pm2 list  \
+          "
