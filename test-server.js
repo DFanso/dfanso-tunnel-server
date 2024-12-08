@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
     res.set("Content-Type", "text/plain");
     res.set("Connection", "close");
-    res.status(200).send('Hello from test server! bla bla bla');
+    res.status(200).send('Hello from test server! wada wada');
 });
 
 // POST endpoint
