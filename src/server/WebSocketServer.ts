@@ -25,8 +25,18 @@ export class WebSocketServer {
       this.server = http.createServer();
     }
 
+    // Handle server errors
+    this.server.on('error', (error: any) => {
+      if (error.code === 'EADDRINUSE') {
+        logger.error(`WebSocket port ${port} is already in use`);
+        process.exit(1);
+      } else {
+        logger.error('WebSocket server error:', error);
+      }
+    });
+
     this.wss = new WSServer({ server: this.server });
-    
+
     // Start listening
     this.server.listen(port, () => {
       logger.info(`WebSocket server${process.env.NODE_ENV === 'production' ? ' (SSL)' : ''} listening on port ${port}`);
@@ -54,19 +64,28 @@ export class WebSocketServer {
       });
 
       ws.on('close', () => {
-        logger.info('WebSocket connection closed');
-        // Remove any tunnels associated with this connection
+        logger.info(`WebSocket connection closed from ${req.socket.remoteAddress}`);
         this.tunnelService.removeTunnelsForSocket(ws);
       });
 
-      ws.on('error', (err) => {
-        logger.error('WebSocket error:', err);
+      ws.on('error', (error) => {
+        logger.error(`WebSocket error from ${req.socket.remoteAddress}:`, error);
       });
+    });
+
+    this.wss.on('error', (error) => {
+      logger.error('WebSocket server error:', error);
     });
   }
 
-  public stop(): void {
-    this.wss.close();
-    this.server.close();
+  public async stop(): Promise<void> {
+    return new Promise((resolve) => {
+      this.wss.close(() => {
+        this.server.close(() => {
+          logger.info('WebSocket server stopped');
+          resolve();
+        });
+      });
+    });
   }
 }

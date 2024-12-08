@@ -42,6 +42,16 @@ export class HttpServer {
       this.server = http.createServer(this.app);
     }
 
+    // Handle server errors
+    this.server.on('error', (error: any) => {
+      if (error.code === 'EADDRINUSE') {
+        logger.error(`Port ${this.port} is already in use`);
+        process.exit(1);
+      } else {
+        logger.error('Server error:', error);
+      }
+    });
+
     // Start listening
     this.server.listen(this.port, () => {
       logger.info(`${this.isSecure ? 'HTTPS/HTTP2' : 'HTTP'} server listening on port ${this.port}`);
@@ -93,7 +103,12 @@ export class HttpServer {
     }
   }
 
-  public stop(): void {
-    this.server.close();
+  public async stop(): Promise<void> {
+    return new Promise((resolve) => {
+      this.server.close(() => {
+        logger.info(`Server on port ${this.port} stopped`);
+        resolve();
+      });
+    });
   }
 }

@@ -41,39 +41,47 @@ async function main() {
     const httpPort = parseInt(process.env.HTTP_PORT || '80');
     const httpsPort = parseInt(process.env.HTTPS_PORT || '443');
 
-    // Initialize servers
+    logger.info(`Environment: ${process.env.NODE_ENV}`);
+    logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
+
+    // Initialize WebSocket server first
     wsServer = new WebSocketServer(tunnelService);
     
+    // Initialize HTTP/HTTPS servers
     if (process.env.NODE_ENV === 'production') {
       // In production, create both HTTP (for redirect) and HTTPS servers
       httpServer = new HttpServer(httpPort, tunnelService, false); // HTTP server for redirects
       httpsServer = new HttpServer(httpsPort, tunnelService, true); // HTTPS server for main traffic
-
-      logger.info(`Environment: ${process.env.NODE_ENV}`);
-      logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
-      logger.info(`HTTP server listening on port ${httpPort}`);
-      logger.info(`HTTPS server listening on port ${httpsPort}`);
-      logger.info(`WebSocket (SSL) server listening on port ${wsPort}`);
     } else {
       // In development, just create HTTP server
       httpServer = new HttpServer(httpPort, tunnelService, false);
-
-      logger.info(`Environment: ${process.env.NODE_ENV}`);
-      logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
-      logger.info(`HTTP server listening on port ${httpPort}`);
-      logger.info(`WebSocket server listening on port ${wsPort}`);
     }
 
     // Handle graceful shutdown
-    const shutdown = () => {
+    const shutdown = async () => {
       logger.info('Shutting down servers...');
-      if (process.env.NODE_ENV === 'production') {
-        httpServer?.stop();
-        httpsServer?.stop();
-      } else {
-        httpServer?.stop();
+      
+      const shutdownPromises: Promise<void>[] = [];
+      
+      if (wsServer) {
+        shutdownPromises.push(wsServer.stop());
       }
-      wsServer?.stop();
+      
+      if (httpServer) {
+        shutdownPromises.push(httpServer.stop());
+      }
+      
+      if (httpsServer) {
+        shutdownPromises.push(httpsServer.stop());
+      }
+
+      try {
+        await Promise.all(shutdownPromises);
+        logger.info('All servers stopped successfully');
+      } catch (error) {
+        logger.error('Error during shutdown:', error);
+      }
+
       process.exit(0);
     };
 
