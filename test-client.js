@@ -1,25 +1,58 @@
 const WebSocket = require('ws');
 const http = require('http');
 
+// Create a local HTTP server to tunnel
+const localServer = http.createServer((req, res) => {
+  console.log('Local server received request:', req.method, req.url);
+  
+  let body = '';
+  req.on('data', chunk => {
+    body += chunk.toString();
+  });
+
+  req.on('end', () => {
+    console.log('Request body:', body);
+
+    if (req.url === '/api/test' && req.method === 'POST') {
+      try {
+        const jsonData = JSON.parse(body);
+        console.log('Received JSON data:', jsonData);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'success',
+          message: 'POST request received',
+          receivedData: jsonData
+        }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON data' }));
+      }
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Hello from local server!');
+    }
+  });
+});
+
 // Configuration
 const SERVER_IP = 'dfanso.dev';  // Your domain
-const TUNNEL_SERVER = `wss://${SERVER_IP}:8080`;  // Using secure WebSocket
-const LOCAL_PORT = 8000;
+const LOCAL_PORT = 3000;
 const SUBDOMAIN = 'test';
+const TUNNEL_SERVER = `wss://${SERVER_IP}:8080`;  // Using secure WebSocket
 
-function connectWebSocket() {
-  console.log('Connecting to:', TUNNEL_SERVER);
+localServer.listen(LOCAL_PORT, () => {
+  console.log(`Local server listening on port ${LOCAL_PORT}`);
   
+  // Connect to tunnel server
   const ws = new WebSocket(TUNNEL_SERVER, {
-    headers: {
-      'Host': 'dfanso.dev'
-    }
+    rejectUnauthorized: false // Only for testing, remove in production
   });
 
   ws.on('open', () => {
     console.log('Connected to tunnel server');
     
-    // Register tunnel
+    // Register the tunnel
     ws.send(JSON.stringify({
       type: 'register',
       subdomain: SUBDOMAIN,
@@ -32,97 +65,72 @@ function connectWebSocket() {
       const message = JSON.parse(data.toString());
       console.log('Received message:', message);
 
-      if (message.type === 'connection') {
-        handleTunnelConnection(message, ws);
+      if (message.type === 'request') {
+        handleTunnelRequest(message, ws);
       }
     } catch (err) {
       console.error('Error parsing message:', err);
     }
   });
 
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
-    // Log more details about the error
-    console.error('Error details:', {
-      message: err.message,
-      code: err.code,
-      address: err.address,
-      port: err.port
-    });
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
   });
 
   ws.on('close', () => {
-    console.log('Disconnected from tunnel server');
-    // Attempt to reconnect after 5 seconds
-    setTimeout(connectWebSocket, 5000);
+    console.log('Connection closed');
+    process.exit(1);
   });
-}
+});
 
-function handleTunnelConnection(message, ws) {
-  const clientId = message.clientId;
-  
-  // Create HTTP request to local server
+function handleTunnelRequest(message, ws) {
+  const { clientId, method, path, headers } = message;
+  console.log('Handling tunnel request:', method, path);
+
+  // Create options for local request
   const options = {
     hostname: 'localhost',
     port: LOCAL_PORT,
-    path: message.path || '/',
-    method: message.method || 'GET',
-    headers: {
-      ...message.headers,
-      'host': 'localhost:' + LOCAL_PORT,
-      'accept': '*/*',
-      'connection': 'keep-alive'
-    }
+    path: path,
+    method: method,
+    headers: headers
   };
 
+  // Make request to local server
   const req = http.request(options, (res) => {
-    console.log(`Local server responded with status code: ${res.statusCode}`);
-    
-    // Send ready signal with response headers
-    ws.send(JSON.stringify({
-      type: 'ready',
-      clientId: clientId,
-      statusCode: res.statusCode,
-      headers: {
-        'content-type': 'text/plain',
-        'connection': 'keep-alive',
-        ...res.headers
-      }
-    }));
-
-    // Forward response data
+    let body = '';
     res.on('data', (chunk) => {
-      ws.send(JSON.stringify({
-        type: 'data',
-        clientId: clientId,
-        data: chunk.toString('base64')
-      }));
+      body += chunk;
     });
 
-    // Forward response end
     res.on('end', () => {
+      // Send response back through tunnel
       ws.send(JSON.stringify({
-        type: 'end',
-        clientId: clientId
+        type: 'response',
+        clientId: clientId,
+        statusCode: res.statusCode,
+        headers: res.headers,
+        data: Buffer.from(body).toString('base64')
       }));
     });
   });
 
-  req.on('error', (err) => {
-    console.error('Error connecting to local server:', err);
+  req.on('error', (error) => {
+    console.error('Error making local request:', error);
     ws.send(JSON.stringify({
       type: 'error',
       clientId: clientId,
-      error: err.message
+      error: error.message
     }));
   });
 
-  // Forward request body if any
-  if (message.body) {
-    req.write(message.body);
-  }
+  // End the request
   req.end();
 }
 
-// Start the connection
-connectWebSocket();
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Shutting down...');
+  localServer.close();
+  process.exit(0);
+});
