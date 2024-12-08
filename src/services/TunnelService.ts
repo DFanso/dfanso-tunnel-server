@@ -24,6 +24,14 @@ export class TunnelService extends EventEmitter {
     super();
     this.sslConfig = sslConfig;
     this.proxyService = new ProxyService();
+    
+    // Log active tunnels every 30 seconds
+    setInterval(() => {
+      const tunnels = Array.from(this.tunnels.entries());
+      logger.info(`Active tunnels: ${tunnels.length}`, {
+        tunnels: tunnels.map(([subdomain]) => subdomain)
+      });
+    }, 30000);
   }
 
   public getTunnels(): [string, TunnelConfig][] {
@@ -32,23 +40,48 @@ export class TunnelService extends EventEmitter {
 
   public registerTunnel(subdomain: string, ws: WebSocket): void {
     this.tunnels.set(subdomain, { subdomain, ws });
+    logger.info(`Registered tunnel for subdomain: ${subdomain}`);
+    
+    // Log current active tunnels
+    const tunnels = Array.from(this.tunnels.entries());
+    logger.info(`Active tunnels: ${tunnels.length}`, {
+      tunnels: tunnels.map(([subdomain]) => subdomain)
+    });
   }
 
   public getTunnel(subdomain: string): TunnelConfig | undefined {
-    return this.tunnels.get(subdomain);
+    const tunnel = this.tunnels.get(subdomain);
+    if (!tunnel) {
+      logger.info(`Tunnel not found for subdomain: ${subdomain}`);
+      // Log current active tunnels
+      const tunnels = Array.from(this.tunnels.entries());
+      logger.info(`Active tunnels: ${tunnels.length}`, {
+        tunnels: tunnels.map(([subdomain]) => subdomain)
+      });
+    }
+    return tunnel;
   }
 
   public registerConnection(clientId: string, ws: WebSocket): { clientId: string; ws: WebSocket } {
     this.connections.set(clientId, ws);
+    logger.info(`Registered connection: ${clientId}`);
     return { clientId, ws };
   }
 
   public removeConnection(clientId: string): void {
     this.connections.delete(clientId);
+    logger.info(`Removed connection: ${clientId}`);
   }
 
   public removeTunnel(subdomain: string): void {
     this.tunnels.delete(subdomain);
+    logger.info(`Removed tunnel for subdomain: ${subdomain}`);
+    
+    // Log current active tunnels
+    const tunnels = Array.from(this.tunnels.entries());
+    logger.info(`Active tunnels: ${tunnels.length}`, {
+      tunnels: tunnels.map(([subdomain]) => subdomain)
+    });
   }
 
   public removeTunnelsForSocket(ws: WebSocket): void {
@@ -59,14 +92,12 @@ export class TunnelService extends EventEmitter {
         logger.info(`Removed tunnel for subdomain: ${subdomain}`);
       }
     }
-
-    // Also clean up any connections using this WebSocket
-    for (const [clientId, connWs] of this.connections.entries()) {
-      if (connWs === ws) {
-        this.connections.delete(clientId);
-        logger.info(`Removed connection: ${clientId}`);
-      }
-    }
+    
+    // Log current active tunnels
+    const tunnels = Array.from(this.tunnels.entries());
+    logger.info(`Active tunnels: ${tunnels.length}`, {
+      tunnels: tunnels.map(([subdomain]) => subdomain)
+    });
   }
 
   public clientReady(clientId: string): void {
@@ -101,72 +132,108 @@ export class TunnelService extends EventEmitter {
     });
   }
 
-  public async proxyRequest(
-    tunnel: TunnelConfig,
-    req: IncomingMessage,
-    res: ServerResponse
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        // Send request through WebSocket
-        const clientId = uuidv4();
-        const connection = this.registerConnection(clientId, tunnel.ws);
+  async proxyRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const host = req.headers.host;
+    if (!host) {
+      logger.error('No host header found in request');
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: 'No host header found' }));
+      return;
+    }
 
-        // Forward the request through the tunnel
-        tunnel.ws.send(JSON.stringify({
-          type: 'request',
-          clientId,
-          method: req.method,
-          path: req.url,
-          headers: req.headers,
-          body: '' // Will be populated if needed
-        }));
+    const subdomain = host.split('.')[0];
+    logger.info(`Proxying request for subdomain: ${subdomain}`);
+    logger.info(`Request method: ${req.method}, path: ${req.url}`);
 
-        // Set timeout for tunnel response
+    const tunnel = this.tunnels.get(subdomain);
+    if (!tunnel) {
+      logger.error(`No tunnel found for subdomain: ${subdomain}`);
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Tunnel not found' }));
+      return;
+    }
+
+    try {
+      // Get request body if present
+      let body = '';
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        body = await new Promise<string>((resolve, reject) => {
+          let data = '';
+          req.on('data', chunk => {
+            data += chunk;
+          });
+          req.on('end', () => resolve(data));
+          req.on('error', reject);
+        });
+      }
+
+      logger.info(`Request body: ${body}`);
+
+      // Send request through tunnel
+      const clientId = Math.random().toString(36).substring(7);
+      const message = {
+        type: 'request',
+        clientId,
+        method: req.method,
+        path: req.url,
+        headers: req.headers,
+        body
+      };
+
+      tunnel.ws.send(JSON.stringify(message));
+
+      // Wait for response
+      const response = await new Promise<{
+        type: string;
+        statusCode: number;
+        headers: Record<string, string | string[]>;
+        data?: string;
+        error?: string;
+      }>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          this.removeConnection(clientId);
           reject(new Error('Tunnel timeout'));
+          cleanup();
         }, 30000);
 
-        // Handle response from tunnel
-        let responseStarted = false;
+        const cleanup = () => {
+          tunnel.ws.removeListener('message', handleMessage);
+          clearTimeout(timeout);
+        };
 
-        connection.ws.on('message', (data: Buffer | string) => {
+        const handleMessage = (data: WebSocket.Data) => {
           try {
             const message = JSON.parse(data.toString());
-
-            switch (message.type) {
-              case 'response':
-                if (!responseStarted) {
-                  responseStarted = true;
-                  clearTimeout(timeout);
-                  res.writeHead(message.statusCode, message.headers);
-                  if (message.data) {
-                    res.end(Buffer.from(message.data, 'base64'));
-                  } else {
-                    res.end();
-                  }
-                  this.removeConnection(clientId);
-                  resolve();
-                }
-                break;
-
-              case 'error':
-                clearTimeout(timeout);
-                this.removeConnection(clientId);
-                reject(new Error(message.error));
-                break;
+            if (message.clientId === clientId) {
+              cleanup();
+              resolve(message);
             }
           } catch (err) {
-            clearTimeout(timeout);
-            this.removeConnection(clientId);
-            reject(err);
+            logger.error('Error parsing tunnel response:', err);
           }
-        });
+        };
 
-      } catch (err) {
-        reject(err);
+        tunnel.ws.on('message', handleMessage);
+      });
+
+      // Handle response
+      if (response.type === 'response') {
+        res.writeHead(response.statusCode, response.headers);
+        if (response.data) {
+          const buffer = Buffer.from(response.data, 'base64');
+          res.end(buffer);
+        } else {
+          res.end();
+        }
+      } else if (response.type === 'error') {
+        logger.error('Tunnel error:', response.error);
+        res.writeHead(502);
+        res.end(JSON.stringify({ error: 'Tunnel error', details: response.error }));
       }
-    });
+    } catch (err) {
+      const error = err as Error;
+      logger.error('Error handling request:', error);
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: 'Internal server error', details: error.message }));
+    }
   }
 }

@@ -94,7 +94,7 @@ export class HttpServer {
           }
 
           // Forward the request to the local service
-          await this.tunnelService.proxyRequest(tunnel, req, res);
+          await this.tunnelService.proxyRequest(req, res);
         } catch (error) {
           logger.error('Error handling request:', error);
           res.status(500).send('Internal Server Error');
