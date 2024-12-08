@@ -8,7 +8,7 @@ A secure tunneling solution that allows you to expose your local servers to the 
 - 🌐 Custom subdomain support (*.dfanso.dev)
 - 🚀 HTTP/2 support
 - 🔄 WebSocket-based tunneling
-- 📦 Easy-to-use client library
+- 📦 Official npm client package: [@dfanso/tunnel-client](https://www.npmjs.com/package/@dfanso/tunnel-client)
 - 🛡️ Production-ready with error handling
 
 ## Architecture
@@ -73,26 +73,26 @@ npm run build
 npm start
 ```
 
-## Client Library
+## Connecting to the Server
 
-### Installation
+### Using the Official npm Client
 
+The recommended way to connect to this tunnel server is using our official npm package [@dfanso/tunnel-client](https://www.npmjs.com/package/@dfanso/tunnel-client).
+
+1. Install the package:
 ```bash
-npm install dfanso-tunnel-client
+npm install @dfanso/tunnel-client
 ```
 
-### Basic Usage
-
+2. Basic usage:
 ```javascript
-const TunnelClient = require('dfanso-tunnel-client');
+const TunnelClient = require('@dfanso/tunnel-client');
 
-// Create a tunnel
 const tunnel = new TunnelClient({
     subdomain: 'myapp',     // Will be myapp.dfanso.dev
-    targetPort: 3000,       // Your local server port
+    targetPort: 3000        // Your local server port
 });
 
-// Connect to tunnel server
 tunnel.connect()
     .then(({ url }) => {
         console.log(`Server is accessible at: ${url}`);
@@ -100,10 +100,9 @@ tunnel.connect()
     .catch(console.error);
 ```
 
-### Express Example
-
+3. With Express.js:
 ```javascript
-const TunnelClient = require('dfanso-tunnel-client');
+const TunnelClient = require('@dfanso/tunnel-client');
 const express = require('express');
 
 const app = express();
@@ -119,11 +118,6 @@ const server = app.listen(3000, () => {
         targetPort: 3000
     });
 
-    tunnel.on('error', console.error);
-    tunnel.on('disconnect', () => {
-        console.log('Tunnel disconnected');
-    });
-
     tunnel.connect()
         .then(({ url }) => {
             console.log(`Server is accessible at: ${url}`);
@@ -132,7 +126,7 @@ const server = app.listen(3000, () => {
 });
 ```
 
-### Client Options
+### Client Configuration Options
 
 ```javascript
 {
@@ -144,10 +138,13 @@ const server = app.listen(3000, () => {
 }
 ```
 
-### Events
+### Client Events
 
-- `error`: Emitted when an error occurs
-- `disconnect`: Emitted when tunnel disconnects
+The client emits the following events:
+- `connect`: When tunnel connection is established
+- `disconnect`: When tunnel connection is lost
+- `error`: When an error occurs
+- `request`: When a request comes through the tunnel
 
 ## Security
 
@@ -156,9 +153,7 @@ const server = app.listen(3000, () => {
 - WebSocket connections are secured
 - Client verification through SSL
 
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
 ├── src/
@@ -172,14 +167,6 @@ const server = app.listen(3000, () => {
 │   └── tunnel-client.js      # Client library
 └── examples/
     └── example.js            # Usage examples
-```
-
-### Building
-
-```bash
-npm run build   # Builds TypeScript
-npm run lint    # Runs ESLint
-npm run format  # Formats code
 ```
 
 ## Testing
