@@ -1,56 +1,53 @@
 // src/index.ts
-import 'dotenv/config';
-import { SSLService } from './services/SSLService';
-import { TunnelService } from './services/TunnelService';
+import { config } from 'dotenv';
 import { HttpServer } from './server/HttpServer';
 import { WebSocketServer } from './server/WebSocketServer';
+import { TunnelService } from './services/TunnelService';
 import { logger } from './utils/logger';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Load environment variables
+config();
 
 async function main() {
   try {
-    const {
-      DOMAIN = 'dfanso.dev',
-      EMAIL = 'leogavin123@outlook.com',
-      HTTP_PORT = '3000',
-      HTTPS_PORT = '3001',
-      WS_PORT = '8080',
-      SSL_DIR = './certs',
-      NODE_ENV = 'development'
-    } = process.env;
+    let sslConfig: { key: Buffer; cert: Buffer } | undefined;
 
-    let sslConfig: { key: string; cert: string; } | undefined;
-    if (NODE_ENV === 'production') {
-      // Initialize SSL only in production
-      logger.info('Initializing SSL certificates...');
-      const sslService = new SSLService(DOMAIN, EMAIL, SSL_DIR);
-      sslConfig = await sslService.initialize();
+    if (process.env.NODE_ENV === 'production') {
+      // In production, load SSL certificates
+      const sslDir = process.env.SSL_DIR || './certs';
+      logger.info(`Loading SSL certificates from ${sslDir}`);
 
-      // Schedule certificate renewal
-      sslService.scheduleRenewal();
-    } else {
-      logger.info('Running in development mode without SSL');
-      sslConfig = undefined;
+      try {
+        sslConfig = {
+          key: fs.readFileSync(path.join(sslDir, 'privkey.pem')),
+          cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem'))
+        };
+        logger.info('SSL certificates loaded successfully');
+      } catch (err) {
+        logger.error('Failed to load SSL certificates:', err);
+        process.exit(1);
+      }
     }
 
-    // Initialize tunnel service
+    // Initialize services
     const tunnelService = new TunnelService(sslConfig);
+    const wsPort = parseInt(process.env.WS_PORT || '8080');
+    const httpPort = parseInt(process.env.HTTP_PORT || '3000');
 
-    // Start HTTP/HTTPS server
-    const httpServer = new HttpServer(tunnelService, sslConfig);
-    httpServer.start(
-      parseInt(HTTP_PORT),
-      sslConfig ? parseInt(HTTPS_PORT) : undefined
-    );
+    // Initialize servers
+    const wsServer = new WebSocketServer(tunnelService);
+    const httpServer = new HttpServer(httpPort, tunnelService);
 
-    // Start WebSocket server for tunnel clients
-    const wsServer = new WebSocketServer(
-      parseInt(WS_PORT),
-      tunnelService
-    );
+    logger.info(`Environment: ${process.env.NODE_ENV}`);
+    logger.info(`Domain: ${process.env.DOMAIN || 'localhost'}`);
+    logger.info(`HTTP${process.env.NODE_ENV === 'production' ? 'S' : ''} server listening on port ${httpPort}`);
+    logger.info(`WebSocket${process.env.NODE_ENV === 'production' ? ' (SSL)' : ''} server listening on port ${wsPort}`);
 
     // Handle graceful shutdown
-    const shutdown = async () => {
-      logger.info('Shutting down...');
+    const shutdown = () => {
+      logger.info('Shutting down servers...');
       httpServer.stop();
       process.exit(0);
     };
@@ -58,13 +55,6 @@ async function main() {
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
 
-    logger.info(`Tunnel server started successfully in ${NODE_ENV} mode`);
-    logger.info(`Domain: ${DOMAIN}`);
-    logger.info(`HTTP Port: ${HTTP_PORT}`);
-    if (sslConfig) {
-      logger.info(`HTTPS Port: ${HTTPS_PORT}`);
-    }
-    logger.info(`WebSocket Port: ${WS_PORT}`);
   } catch (err) {
     logger.error('Failed to start server:', err);
     process.exit(1);

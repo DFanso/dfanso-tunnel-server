@@ -2,34 +2,59 @@
 import express from 'express';
 import * as http from 'http';
 import * as https from 'https';
+import * as fs from 'fs';
+import * as path from 'path';
 import { TunnelService } from '../services/TunnelService';
 import { TunnelConfig } from '../types/tunnel';
 import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
+import cors from 'cors';
 
 export class HttpServer {
   private app: express.Application;
-  private httpServer: http.Server;
-  private httpsServer?: https.Server;
-  private tunnelService: TunnelService;
+  private server: http.Server | https.Server;
 
-  constructor(tunnelService: TunnelService, sslConfig?: { key: string; cert: string }) {
-    this.tunnelService = tunnelService;
+  constructor(
+    private port: number,
+    private tunnelService: TunnelService
+  ) {
     this.app = express();
     this.setupExpress();
-    this.httpServer = http.createServer(this.app);
-    
-    if (sslConfig) {
-      this.httpsServer = https.createServer(sslConfig, this.app);
+
+    if (process.env.NODE_ENV === 'production') {
+      // In production, use HTTPS
+      const sslDir = process.env.SSL_DIR || './certs';
+      const server = https.createServer({
+        key: fs.readFileSync(path.join(sslDir, 'privkey.pem')),
+        cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem'))
+      }, this.app);
+      
+      this.server = server;
+      server.listen(port, () => {
+        logger.info(`HTTPS server listening on port ${port}`);
+      });
+    } else {
+      // In development, use HTTP
+      const server = http.createServer(this.app);
+      this.server = server;
+      server.listen(port, () => {
+        logger.info(`HTTP server listening on port ${port}`);
+      });
     }
   }
 
-  private setupExpress() {
+  private setupExpress(): void {
     this.app.use(express.json());
-    
+    this.app.use(express.urlencoded({ extended: true }));
+
+    // Add CORS headers in development
+    if (process.env.NODE_ENV !== 'production') {
+      this.app.use(cors());
+    }
+
     // Health check endpoint
     this.app.get('/health', (req, res) => {
-      res.json({ status: 'ok' });
+      res.send('OK');
     });
 
     // API endpoints for tunnel management
@@ -42,17 +67,53 @@ export class HttpServer {
     // Handle tunnel requests
     this.app.use(async (req, res) => {
       const host = req.headers.host;
-      logger.info(`Incoming request - Host: ${host}, URL: ${req.url}`);
-
       if (!host) {
-        logger.warn('No host header in request');
         return res.status(400).send('No host header');
       }
 
-      // Extract subdomain and remaining path
-      const urlParts = req.url?.split('/') || [];
-      const subdomain = urlParts[1] || '';
-      const remainingPath = '/' + urlParts.slice(2).join('/');
+      let subdomain: string;
+      const domain = process.env.DOMAIN || 'localhost';
+      const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1');
+
+      // Extract subdomain based on environment and host
+      if (isLocalhost) {
+        // In localhost, use path-based routing
+        const urlParts = req.url?.split('/') || [];
+        subdomain = urlParts[1] || '';
+        if (!subdomain) {
+          // Show available tunnels on root path
+          const tunnels = this.tunnelService.getTunnels();
+          return res.send(`
+            <h1>Available Tunnels</h1>
+            <ul>
+              ${tunnels.map(([name]) => `
+                <li><a href="/${name}">${name}</a></li>
+              `).join('')}
+            </ul>
+          `);
+        }
+        // Modify URL to remove subdomain from path
+        req.url = '/' + urlParts.slice(2).join('/');
+      } else {
+        // For domain access, extract subdomain from hostname
+        if (host.endsWith(domain)) {
+          subdomain = host.split('.')[0];
+          if (!subdomain || subdomain === domain) {
+            // Show available tunnels on root domain
+            const tunnels = this.tunnelService.getTunnels();
+            return res.send(`
+              <h1>Available Tunnels</h1>
+              <ul>
+                ${tunnels.map(([name]) => `
+                  <li><a href="${req.protocol}://${name}.${domain}">${name}</a></li>
+                `).join('')}
+              </ul>
+            `);
+          }
+        } else {
+          return res.status(400).send('Invalid domain');
+        }
+      }
 
       // Find tunnel for subdomain
       const tunnel = this.tunnelService.getTunnel(subdomain);
@@ -71,7 +132,7 @@ export class HttpServer {
           type: 'connection',
           clientId,
           method: req.method,
-          path: remainingPath,
+          path: req.url,
           headers: req.headers,
           body: ''  // Will be populated later
         }));
@@ -133,7 +194,7 @@ export class HttpServer {
             type: 'connection',
             clientId: connection.clientId,
             method: req.method,
-            path: remainingPath,
+            path: req.url,
             headers: req.headers,
             body: requestBody
           }));
@@ -146,7 +207,7 @@ export class HttpServer {
     });
 
     // Redirect HTTP to HTTPS only if HTTPS is enabled
-    if (this.httpsServer) {
+    if (this.server instanceof https.Server) {
       this.app.use((req, res, next) => {
         if (!req.secure) {
           return res.redirect(`https://${req.headers.host}${req.url}`);
@@ -156,31 +217,12 @@ export class HttpServer {
     }
   }
 
-  public start(httpPort: number, httpsPort?: number) {
-    this.httpServer.listen(httpPort, () => {
-      logger.info(`HTTP server listening on port ${httpPort}`);
-    });
-
-    if (this.httpsServer && httpsPort) {
-      this.httpsServer.listen(httpsPort, () => {
-        logger.info(`HTTPS server listening on port ${httpsPort}`);
-      });
-    }
-  }
-
-  public getHttpServer(): http.Server {
-    return this.httpServer;
-  }
-
-  public getHttpsServer(): https.Server | undefined {
-    return this.httpsServer;
+  public getServer(): http.Server | https.Server {
+    return this.server;
   }
 
   public stop() {
-    this.httpServer.close();
-    if (this.httpsServer) {
-      this.httpsServer.close();
-    }
-    logger.info('HTTP' + (this.httpsServer ? ' and HTTPS' : '') + ' servers stopped');
+    this.server.close();
+    logger.info('Server stopped');
   }
 }

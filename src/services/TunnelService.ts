@@ -15,9 +15,9 @@ interface Connection {
 export class TunnelService extends EventEmitter {
   private tunnels: Map<string, TunnelConfig> = new Map();
   private connections: Map<string, WebSocket> = new Map();
-  private sslConfig?: { key: string; cert: string };
+  private sslConfig?: { key: Buffer; cert: Buffer };
 
-  constructor(sslConfig?: { key: string; cert: string }) {
+  constructor(sslConfig?: { key: Buffer; cert: Buffer }) {
     super();
     this.sslConfig = sslConfig;
   }

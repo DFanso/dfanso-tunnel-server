@@ -1,19 +1,36 @@
 import WebSocket, { WebSocketServer as WSServer, Data } from 'ws';
 import { logger } from '../utils/logger';
 import { TunnelService } from '../services/TunnelService';
+import * as https from 'https';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export class WebSocketServer {
   private wss: WSServer;
-  private tunnelService: TunnelService;
 
-  constructor(port: number, tunnelService: TunnelService) {
-    this.wss = new WSServer({ port });
-    this.tunnelService = tunnelService;
+  constructor(private tunnelService: TunnelService) {
+    const port = parseInt(process.env.WS_PORT || '8080');
+
+    if (process.env.NODE_ENV === 'production') {
+      // In production, use SSL
+      const sslDir = process.env.SSL_DIR || './certs';
+      const server = https.createServer({
+        key: fs.readFileSync(path.join(sslDir, 'privkey.pem')),
+        cert: fs.readFileSync(path.join(sslDir, 'fullchain.pem'))
+      });
+
+      this.wss = new WSServer({ server });
+      server.listen(port);
+      logger.info(`WebSocket server (SSL) listening on port ${port}`);
+    } else {
+      // In development, no SSL
+      this.wss = new WSServer({ port });
+      logger.info(`WebSocket server listening on port ${port}`);
+    }
     this.initialize();
-    logger.info(`WebSocket server listening on port ${port}`);
   }
 
-  private initialize(): void {
+  initialize(): void {
     this.wss.on('connection', (ws, req) => {
       logger.info(`New WebSocket connection from ${req.socket.remoteAddress}`);
 
