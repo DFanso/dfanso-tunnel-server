@@ -69,26 +69,24 @@ jobs:
           npm ci --production && \
           
           echo '=== Creating ecosystem config ===' && \
-          cat > ecosystem.config.js << 'EOL'
-          module.exports = {
+          echo 'module.exports = {
             apps: [{
-              name: 'dfanso-tunnel',
-              script: './dist/index.js',
+              name: \"dfanso-tunnel\",
+              script: \"./dist/index.js\",
               instances: 2,
               autorestart: true,
               watch: true,
-              max_memory_restart: '1G',
+              max_memory_restart: \"1G\",
               env: {
-                NODE_ENV: '${{ secrets.NODE_ENV }}',
-                DOMAIN: '${{ secrets.DOMAIN }}',
-                WS_PORT: '${{ secrets.WS_PORT }}',
-                HTTP_PORT: '${{ secrets.HTTP_PORT }}',
-                HTTPS_PORT: '${{ secrets.HTTPS_PORT }}',
-                SSL_DIR: '${{ secrets.SSL_DIR }}'
+                NODE_ENV: \"${{ secrets.NODE_ENV }}\",
+                DOMAIN: \"${{ secrets.DOMAIN }}\",
+                WS_PORT: \"${{ secrets.WS_PORT }}\",
+                HTTP_PORT: \"${{ secrets.HTTP_PORT }}\",
+                HTTPS_PORT: \"${{ secrets.HTTPS_PORT }}\",
+                SSL_DIR: \"${{ secrets.SSL_DIR }}\"
               }
             }]
-          };
-          EOL
+          };' > ecosystem.config.js && \
           
           echo '=== Setting up PM2 ===' && \
           export PATH=$PATH:/usr/local/bin:/root/.npm-global/bin && \
