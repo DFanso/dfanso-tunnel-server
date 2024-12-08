@@ -1,20 +1,17 @@
 const WebSocket = require('ws');
 const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
 
 // Configuration
-const TUNNEL_SERVER = process.env.NODE_ENV === 'production' 
-  ? 'wss://dfanso.dev:8080'
-  : 'ws://localhost:8080';
+const SERVER_IP = 'localhost';  // Using localhost for testing
+const TUNNEL_SERVER = `ws://${SERVER_IP}:8080`;  // Using ws:// for local testing
 const LOCAL_PORT = 8000;
 const SUBDOMAIN = 'test';
 
-// WebSocket connection with auto-reconnect
 function connectWebSocket() {
+  console.log('Connecting to:', TUNNEL_SERVER);
+  
   const ws = new WebSocket(TUNNEL_SERVER, {
-    rejectUnauthorized: false, // Allow self-signed certificates in development
+    rejectUnauthorized: false,  // Temporarily disable SSL verification for testing
     headers: {
       'Host': 'dfanso.dev'
     }
@@ -46,6 +43,13 @@ function connectWebSocket() {
 
   ws.on('error', (err) => {
     console.error('WebSocket error:', err);
+    // Log more details about the error
+    console.error('Error details:', {
+      message: err.message,
+      code: err.code,
+      address: err.address,
+      port: err.port
+    });
   });
 
   ws.on('close', () => {
@@ -64,7 +68,12 @@ function handleTunnelConnection(message, ws) {
     port: LOCAL_PORT,
     path: message.path || '/',
     method: message.method || 'GET',
-    headers: message.headers || {}
+    headers: {
+      ...message.headers,
+      'host': 'localhost:' + LOCAL_PORT,
+      'accept': '*/*',
+      'connection': 'keep-alive'
+    }
   };
 
   const req = http.request(options, (res) => {
@@ -75,7 +84,11 @@ function handleTunnelConnection(message, ws) {
       type: 'ready',
       clientId: clientId,
       statusCode: res.statusCode,
-      headers: res.headers
+      headers: {
+        'content-type': 'text/plain',
+        'connection': 'keep-alive',
+        ...res.headers
+      }
     }));
 
     // Forward response data
