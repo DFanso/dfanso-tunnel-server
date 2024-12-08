@@ -73,7 +73,7 @@ jobs:
             apps: [{
               name: \"dfanso-tunnel\",
               script: \"./dist/index.js\",
-              instances: 1,
+              instances: 2,
               autorestart: true,
               watch: true,
               max_memory_restart: \"1G\",
@@ -115,4 +115,5 @@ jobs:
           
           echo '=== Final Status ===' && \
           echo 'PM2 process list:' && \
-          pm2 list 
+          pm2 list  \
+          "
