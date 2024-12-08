@@ -42,9 +42,13 @@ export class TunnelService extends EventEmitter {
     return Array.from(this.tunnels.entries());
   }
 
-  public registerTunnel(subdomain: string, ws: WebSocket): void {
-    this.tunnels.set(subdomain, { subdomain, ws });
-    logger.info(`Registered tunnel for subdomain: ${subdomain}`);
+  public registerTunnel(subdomain: string, ws: WebSocket, targetPort: number): void {
+    this.tunnels.set(subdomain, { 
+      subdomain, 
+      ws,
+      targetPort
+    });
+    logger.info(`Registered tunnel for subdomain: ${subdomain} targeting port ${targetPort}`);
     
     // Log current active tunnels
     const tunnels = Array.from(this.tunnels.entries());

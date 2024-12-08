@@ -55,8 +55,13 @@ export class WebSocketServer {
           logger.info('Received WebSocket message:', message);
 
           if (message.type === 'register') {
-            this.tunnelService.registerTunnel(message.subdomain, ws);
-            logger.info(`Registered tunnel for subdomain: ${message.subdomain}`);
+            if (!message.port) {
+              logger.error('No port specified in registration message');
+              ws.send(JSON.stringify({ type: 'error', error: 'No port specified' }));
+              return;
+            }
+            this.tunnelService.registerTunnel(message.subdomain, ws, message.port);
+            logger.info(`Registered tunnel for subdomain: ${message.subdomain} targeting port ${message.port}`);
           }
         } catch (err) {
           logger.error('Error processing WebSocket message:', err);
