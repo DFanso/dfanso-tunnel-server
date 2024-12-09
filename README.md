@@ -102,7 +102,7 @@ The recommended way to connect to this tunnel server is using our official npm p
 
 1. Install the package:
 ```bash
-npm install @dfanso/tunnel-client@1.0.2
+npm install @dfanso/tunnel-client
 ```
 
 2. Basic usage:
